@@ -601,4 +601,145 @@ Figure 16. Average gene expression per cluster across the DV axis and spatial ex
 #plot(DEGs_pcomp$x[,1], DEGs_pcomp$x[,2], xlab="PC1", ylab="PC2", col=clusters)
 #cor.test(DEGs_pcomp$x[,1], DEGs_data$Gene.start..bp., method="spearman")
 
+DEGs<-read.csv("./DEGs_expression.csv", header = TRUE, row.names = 1, stringsAsFactors = F)
+resOrdered<-read.csv("./diffexp_windows10.csv", header=TRUE, row.names=1, stringsAsFactors = F)
+normalized<-read.csv("./DVnormalized.csv", header=TRUE, row.names=1, stringsAsFactors = F)
+min_max<-read.csv("./minmax.csv", header=TRUE, row.names=1, stringsAsFactors = F)
+
+#Spatial expression patterns of differentially expressed ORs
+heatDEORs<-log10(normalized[match(rownames(resOrdered)[grep("Olfr", rownames(resOrdered)[resOrdered$padj<0.05])], rownames(normalized)),]+1)
+colnames(heatDEORs)<-normalized[dim(normalized)[1],]
+heatmap.2(heatDEORs, Colv = NA, xlab="Position D-V", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8, Rowv = F)
+
+#Spatial expression patterns of non differentially expressed ORs
+heatNdeORs<-log10(normalized[match(rownames(resOrdered)[grep("Olfr", rownames(resOrdered)[resOrdered$padj>=0.05])], rownames(normalized)),]+1)
+colnames(heatNdeORs)<-normalized[dim(normalized)[1],]
+heatmap.2(heatNdeORs, Colv = NA, xlab="Position D-V", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8, Rowv = F)
+
+#Spatial expression patterns of OSN markers
+OSN<-as.data.frame(normalized[rownames(normalized)=="Omp",])
+for(marker in c("Gnal", "Cnga2")){
+  OSN<-cbind(OSN, normalized[rownames(normalized)==marker,])
+}
+colnames(OSN)<-c("Omp", "Gnal", "Cnga2")
+
+heatOSN<-t(log10(OSN+1))
+colnames(heatOSN)<-normalized[dim(normalized)[1],]
+heatmap.2(heatOSN, Colv = NA, xlab="Position D-V", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8, Rowv = F)
+```
+
+Figure 17. Spatial expression patterns of ORs. a) Differentially expressed ORs. b) Non-differentially expressed ORs
+
+```{r}
+#Clustering by differentially expressed ORs
+
+deORs<-DEGs[grep("Olfr", rownames(DEGs)),]
+cor.deORs<-cor(t(deORs),method="spearman") #compute correlation matrix
+test.dist<-as.dist(sqrt(0.5*((1-cor.deORs)))) #define distance matrix
+
+
+require(dynamicTreeCut)
+require(WGCNA)
+
+test.clust<-hclust(test.dist, method="average")
+#estimate number of clusters with dynamicTreeCut
+cut2<-cutreeDynamic(test.clust,distM=as.matrix(test.dist), 
+                    minClusterSize=30, method="hybrid",deepSplit = 1 )
+clusters_deORs<-labels2colors(cut2) 
+
+names(clusters_deORs)<-row.names(deORs)
+table(clusters_deORs)
+```
+
+```{r}
+
+#visualize data with tsne
+require(Rtsne)
+set.seed(10)
+test.tsne<-Rtsne(test.dist, is_distance = T)
+plot(test.tsne$Y, col=clusters_deORs)
+```
+
+Figure 18. Tsne plot for differentially expressed ORs. Colors = clusters
+
+```{r}
+#Expression patterns per cluster
+
+library(matrixStats)
+position<-sub('\\..*', '', colnames(deORs))
+position<-as.numeric(gsub("X", "", position))
+norm_deORs<-log10(deORs+1)
+norm_deORs<-apply(norm_deORs, 1, function(x){(x-min(x))/(max(x)-min(x))})
+norm_deORs<-data.frame(position, norm_deORs)
+#norm_degs<-t(norm_degs)
+
+library(locfit)
+
+fitted_data<-apply(norm_deORs[,2:length(colnames(norm_deORs))], 2, function(x){locfit(x~lp(norm_deORs[,1], deg = 2, nn=1), data=norm_deORs)})
+
+std <- function(x) sd(x)/sqrt(length(x))
+
+library(scales)
+
+par(mfrow=c(2, 2))
+
+
+for(i in unique(clusters_deORs)){
+  means<-rowMeans(norm_deORs[,-1][,which(clusters_deORs==i)])
+  plot(locfit(means~lp(norm_deORs[,1], deg=2, nn=1)), ylim=c(0, 1), main=i, ylab="norm. log10 expression", xlab="position D-V")
+#  plot(fitted_data[[rownames(DEGs)[which(clusters==i)][1]]], ylim=c(0, 1), main=i, ylab="norm. log10 expression", type="l", col=i, xlab="position D-V")
+  sapply(rownames(deORs)[which(clusters_deORs==i)], function(x){lines(fitted_data[[x]], col=alpha(i, 0.1))})
+  lines(locfit(means~lp(norm_deORs[,1], deg=2, nn=1)), lwd=2)
+}
+
+```
+
+Figure 19. Average gene expression per cluster across the DV axis and spatial expression pattern per gene in colors. Gene expression values were log10 scaled and then normalized to values between 0 and 1.
+
+Genomic clustering
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1794568/
+https://genome.weizmann.ac.il/horde/app/webroot/CLICs/
+
+```{r}
+#Genomic positions
+
+genes_data<-read.csv("./mm10_gene_coords.txt", stringsAsFactors = F, header=T)
+genes_data$length<-genes_data$Gene.end..bp.-genes_data$Gene.start..bp.
+genes_data<-genes_data[order(genes_data$Chromosome.scaffold.name),]
+ORs_data<-genes_data[grep("Olfr", genes_data$Gene.name),]
+
+#Clusters by position in the genome
+
+clust<-character()
+for(j in unique(ORs_data$Chromosome.scaffold.name)){
+  sel<-which(ORs_data$Chromosome.scaffold.name==j)
+  ORs_data[sel,]<-ORs_data[sel,][order(ORs_data[sel,]$Gene.start..bp.),]
+  
+  clust[sel[1]]<-paste(j, ".", 1, sep="")
+  x<-1
+  i<-2
+  thr<-300000
+  while(i<=length(sel)){
+    if(ORs_data$Gene.start..bp.[sel[i]]<=ORs_data$Gene.start..bp.[sel[i-1]]+thr){
+      clust[sel[i]]<-paste(j, ".", x, sep="")
+    } else{
+      x<-x+1
+      clust[sel[i]]<-paste(j, ".", x, sep="")
+    }
+    i<-i+1
+  }
+}
+
+ORs_data$gen_clust<-clust
+
+```
+
+```{r}
+#Test if there is an association between genes' position in the genome and their spatial expresssion pattern
+unique(clusters_deORs)
+deORs_data<-ORs_data[match(rownames(deORs), ORs_data$Gene.name),]
+deORs_data$clusters<-clusters_deORs
+
+tbl<-table(deORs_data$gen_clust, deORs_data$clusters)
+chisq.test(tbl)
 ```
