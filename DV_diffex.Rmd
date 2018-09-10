@@ -1,0 +1,604 @@
+---
+title: "DV differential expression"
+author: "Mayra L. Ruiz Tejada Segura"
+date: "March 22, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Now we will look at the Dorsal-Ventral axis (DV). 
+
+Quality check
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+setwd("C:/Users/User/Desktop/lab_helmholtz/spatial_transcriptomics/")
+
+#DV_dataset<-read.csv("./gene_counts/DV_dataset.csv", stringsAsFactors = FALSE, header=F, sep="\t")
+#DV_dataset<-DV_dataset[,-seq(3, 454, by=2)]
+#DV_dataset<-DV_dataset[,-seq(230, 341, by=2)]
+
+#rownames(DV_dataset)<-DV_dataset[,1]
+#DV_dataset<-DV_dataset[,-1]
+
+
+#colnames(DV_dataset)<-gsub("_L002_counts.csv", "", read.csv("./gene_counts/DV_sample_names.csv", header=F, stringsAsFactors = F)[,1])
+
+#x<-as.numeric(gsub(".+_S", "", names(DV_dataset)))
+#colnames(DV_dataset)[x %% 2 !=0][-grep("DV", colnames(DV_dataset)[x %% 2 !=0])]<-c(paste("DV1-", colnames(DV_dataset)[x %% 2 !=0][-grep("DV", colnames(DV_dataset)[x %% 2 !=0])], sep=""))
+
+#colnames(DV_dataset)[x %% 2 ==0][-grep("DV", colnames(DV_dataset)[x %% 2 ==0])]<-c(paste("DV2-", colnames(DV_dataset)[x %% 2 ==0][-grep("DV", colnames(DV_dataset)[x %% 2 ==0])], sep=""))
+
+#DV_dataset<-DV_dataset[,-228]
+
+#write.csv(DV_dataset, "./DV_dataset_rightNames.csv")
+
+DV_dataset<-read.csv("./DV_dataset_rightNames.csv", header=TRUE, stringsAsFactors = FALSE, row.names = 1)
+
+expr<-DV_dataset[1:(dim(DV_dataset)[1]-5),]
+stats<-DV_dataset[(dim(DV_dataset)[1]-4):dim(DV_dataset)[1],]
+
+rm(DV_dataset)
+
+library(edgeR)
+
+genes_data<-read.csv("../interactions_enhancers_ORs/mm10_gene_coords.txt", stringsAsFactors = F, header=T)
+genes_data$length<-genes_data$Gene.end..bp.-genes_data$Gene.start..bp.
+expr$Gene.stable.ID<-rownames(expr)
+genes_data<-genes_data[match(expr$Gene.stable.ID, genes_data$Gene.stable.ID),]
+expr<-expr[,-which(colnames(expr)=="Gene.stable.ID")]
+expr<-as.matrix(expr)
+rownames(expr)<-genes_data$Gene.name
+
+exp_rpkm<-rpkm(expr, gene.length=genes_data$length, normalized.lib.sizes=TRUE)
+
+stats[6,]<-apply(expr, 2, sum)
+rownames(stats)[6]<-"__aligned"
+
+stats[7,]<-stats[1,]+stats[2,]+stats[3,]+stats[4,]+stats[5,]+stats[6,]
+rownames(stats)[7]<-"__total"
+
+stats[8,]<-100*stats[6,]/stats[7,]
+rownames(stats)[8]<-"__percent_mapped"
+
+stats[9,]<-100*stats[1,]/stats[7,]
+rownames(stats)[9]<-"__percent_no_feature"
+
+stats[10,]<-100*stats[2,]/stats[7,]
+rownames(stats)[10]<-"__percent_ambiguous"
+
+stats[11,]<-100*stats[3,]/stats[7,]
+rownames(stats)[11]<-"__percent_low_quality"
+
+stats[12,]<-100*stats[5,]/stats[7,]
+rownames(stats)[12]<-"__percent_not_unique"
+
+stats[13,]<-100*stats[4,]/stats[7,]
+rownames(stats)[13]<-"__percent_not_aligned"
+
+stats[14,]<-apply(exp_rpkm, 2, function(x){length(which(x>10))})
+rownames(stats)[14]<-"__detected_genes"
+
+stats[15,]<-100*apply(expr[which(genes_data$Chromosome.scaffold.name=="MT"),], 2, sum)/stats[7,]
+rownames(stats)[15]<-"__percent_reads_mapped_to_mit"
+
+col<-rep("red", 283)
+col[grep("DV2", names(stats))]<-"blue"
+col[grep("DV3", names(stats))]<-"green"
+
+par(mfrow=c(3, 3), mar=c(4,2,2,2))
+
+for(i in 8:15){
+  plot(as.numeric(log10(stats[7,]+1)), as.numeric(stats[i,]), main=rownames(stats)[i], ylab="", xlab="log10(total reads+1)", col=col)
+}
+
+plot(1, type="n", axes=FALSE, xlab="", ylab="")
+legend("bottomright", c("DV1", "DV2", "DV3"), pch=1, col=c("red", "blue", "green"))
+```
+
+Figure 1. Quality statistics of samples
+
+The quality of the dataset looks good, we have high percentages of mapped reads, not many genes mapped to mitochondrial genome and not many low quality reads.
+
+We looked at olfactory neurons' maturity markers to select samples based on neuron density.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(gplots)
+library(RColorBrewer)
+my_palette <- colorRampPalette(c("white", "red"))(n = 100)
+marker_heat<-as.data.frame(expr[rownames(expr)=="Omp",])
+for(marker in c("Gnal", "Cnga2")){
+  marker_heat<-cbind(marker_heat, expr[rownames(expr)==marker,])
+}
+colnames(marker_heat)<-c("Omp", "Gnal", "Cnga2")
+
+marker_heat<-log10(marker_heat+1)
+#marker_heat[marker_heat==-Inf]=0
+
+position<-colnames(expr)
+#position<-gsub("/mnt.+ruiz/", "", position[,1])
+
+#x<-gsub(".+_S", "", position[,1])
+#x<-as.numeric(gsub("_L.+.csv", "", x))
+position<-gsub("_S.+", "", position)
+position<-gsub("DV..", "", position)
+#position<-position[-81]
+
+y<-c(paste(rep(c("A", "B", "C", "D", "E", "F", "G", "H"), 12), rep(c("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"), each=8), sep=""))
+y<-data.frame(y, 1:96, stringsAsFactors = FALSE)
+
+#position<-position[x %% 2 !=0]
+#rm(x)
+
+x<-numeric()
+for(i in 1:length(position)){
+  x[i]<-which(y$y==position[i])
+}
+
+position<-x
+rm(x)
+
+
+#marker_heat<-cbind(marker_heat, position)
+#marker_heat<-t(marker_heat[order(position),])
+#colnames(marker_heat)<-marker_heat[4, ]
+#marker_heat<-marker_heat[-4,]
+
+heatmap.2(t(as.matrix(marker_heat)), xlab="Position D-V", trace='none', key.title=NA, key.ylab=NA, col=my_palette, cexRow = 0.8)
+x<-heatmap.2(t(as.matrix(marker_heat)), xlab="Position D-V", trace='none', key.title=NA, key.ylab=NA, col=my_palette, cexRow = 0.8)
+```
+
+Figure 2. Neuronal markers expression heatmap.
+
+
+Sample selection
+
+We took the clusters with high expression of OSN markers (cluster [[1]][[1]] and cluster[[2]]) for our analysis 
+
+```{r, echo=FALSE, message=FALSE}
+
+#Selection
+
+col=c(rep("black", dim(expr)[2]))
+col[!is.na(match(colnames(expr), labels(x$colDendrogram[[1]][[1]])))]<-"green"
+col[!is.na(match(colnames(expr), labels(x$colDendrogram[[2]])))]<-"green"
+
+#col[which(stats[8,]<60)]<-"black"
+#col[which(stats[14,]<1000)]<-"black"
+#col[which(stats[15,]>8)]<-"black"
+#col[as.numeric(log10(stats[7,]+1))<3]<-"black"
+#col[expr[rownames(expr)=="Omp",]==0]<-"black"
+#col[expr[rownames(expr)=="Gnal",]==0]<-"black"
+#col[expr[rownames(expr)=="Cnga2",]==0]<-"black"
+
+
+selection<-which(col!="black")
+```
+
+```{r, echo=FALSE, message=FALSE}
+
+#DESeq normalisation: It takes the genes that don't have 0s in expression values across samples to calculate the normalization factors SI (norm.val=exp/SI) -> check how many genes dont have 0s across samples [>100])
+
+#ceros_per_gene<-apply(expr, 1, function(x){length(which(x==0))})
+#length(which(ceros_per_gene==0))
+#5
+
+#ceros_per_gene<-apply(expr[,selection], 1, function(x){length(which(x==0))})
+#length(which(ceros_per_gene==0))
+#6
+#1924 with detected genes threshold
+#122 with total no. reads thr.
+```
+
+The statistics of our selected samples look as follows:
+
+```{r, echo=FALSE, message=FALSE}
+par(mfrow=c(3, 3), mar=c(4,2,2,2))
+
+plot(as.numeric(log10(stats[7,]+1)), as.numeric(stats[8,]), main="% mapped reads", ylab="", xlab="log10(total reads+1)", col=col)
+abline(h=60)
+
+for(i in 9:14){
+  plot(as.numeric(log10(stats[7,]+1)), as.numeric(stats[i,]), main=rownames(stats)[i], ylab="", xlab="log10(total reads+1)", col=col)
+}
+
+plot(as.numeric(log10(stats[7,]+1)), as.numeric(stats[15,]), main="% mapped to mitochondria", ylab="", xlab="log10(total reads+1)", col=col)
+abline(h=8)
+
+plot(1, type="n", axes=FALSE, xlab="", ylab="")
+legend("bottomright", c("Not Selected", "Selected"), pch=1, col=c("black", "green"))
+
+```
+
+Figure 3. Quality statistics for not selected and selected samples.
+
+Here we can see the distribution of quality statistics among our selected samples.
+
+```{r, echo=FALSE, message=FALSE}
+par(mfrow=c(3, 3), mar=c(4,2,2,2))
+
+for(i in 8:15){
+  boxplot(as.numeric(stats[i, selection]), main=rownames(stats)[i])
+}
+
+boxplot(as.numeric(log10(stats[7, selection]+1)), main="Total no. of reads (log10)")
+
+color_selection<-col
+#position<-1:37
+
+sel_positions<-position[selection]
+
+selected<-expr[, selection] #select samples with nice quality stats
+```
+
+Figure 4. Stats of good samples
+
+Then we plotted the number of Dorsal and ventral samples that we selected. As the most ventral samples can have a smaller amount of neurons because of the size of the slices, we can confirm that most of the samples we selected are from the dorsal area.
+
+
+```{r, echo=FALSE, message=FALSE}
+par(mfrow=c(1, 1))
+plot(c(length(sel_positions[sel_positions<49]), length(sel_positions[sel_positions>=49])), xaxt='n', xlab="", ylab="", ylim=c(0, 100), pch=19, cex=4, col=c("red", "blue"), main="Number of samples per area")
+legend("bottomright", c("Dorsal", "Ventral"), pch=19, col=c("red", "blue"))
+```
+
+Figure 5. Number of dorsal (1-48) and ventral (49-96) samples selected
+
+
+```{r, echo=FALSE, message=FALSE}
+
+#rpm normalization
+#normalized<-cpm(selected, normalized.lib.sizes=TRUE)
+#deseq normalization
+library(DESeq2)
+batch<-rep("DV1", length(colnames(selected)))
+batch[grep("DV2", colnames(selected))]<-"DV2"
+batch[grep("DV3", colnames(selected))]<-"DV3"
+
+batch1<-c(length(batch[grep("DV1", batch)]), 100*length(batch[grep("DV1", batch)])/96, 96-length(batch[grep("DV1", batch)]), 100-(100*length(batch[grep("DV1", batch)])/96))
+batch2<-c(length(batch[grep("DV2", batch)]), 100*length(batch[grep("DV2", batch)])/96, 96-length(batch[grep("DV2", batch)]), 100-(100*length(batch[grep("DV2", batch)])/96))
+batch3<-c(length(batch[grep("DV3", batch)]), 100*length(batch[grep("DV3", batch)])/96, 96-length(batch[grep("DV3", batch)]), 100-(100*length(batch[grep("DV3", batch)])/96))
+batch_dat<-t(data.frame(batch1, batch2, batch3))
+colnames(batch_dat)<-c("#Good", "%Good", "#Bad", "%Bad")
+batch_dat
+
+coldata <- data.frame(row.names=colnames(selected), batch)
+dds <- DESeqDataSetFromMatrix(countData=as.matrix(selected), colData=coldata, design=~batch) #transform dataset
+dds<-DESeq(dds)
+normalized<-counts(dds, normalized = TRUE) #get normalised counts
+#rownames(normalized)<-genes_data$Gene.name
+#geometric.mean<-function(q){exp(mean(log(q)))}
+#normalized<-apply(normalized, 2, function(i){1000*i/geometric.mean(c(i[rownames(normalized)=="Omp"], i[rownames(normalized)=="Gnal"], i[rownames(normalized)=="Cnga2"]))})
+#write.csv(normalized, "./DV_rightNames_normalized.csv")
+```
+
+Table 1. Good (selected) and bad (not selected) samples per batch
+
+Having eliminated the samples with low neuron density, we normalized our data using the DESeq method.
+
+In order to see if the samples clustered in some way based on our expression data, we performed a principal components analysis.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+par(mfrow=c(1, 1), mar=c(4, 4, 4, 4))
+
+#PCA log scale
+samples_pcomp2<-prcomp(t(log10(normalized[-which(rowSums(normalized)==0),]+1)), scale=F)
+
+plot(samples_pcomp2$x[,1], samples_pcomp2$x[,2], xlab="PC1", ylab="PC2", col=col[-which(col=="black")])
+
+barplot(summary(samples_pcomp2)$importance[2,]*100, main="% variance explained per PC", ylab="")
+
+```
+
+Figure 6. Selected samples' expression PCA
+
+Then we checked that our principal components have nothing to do with quality statistics
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow=c(3, 3), mar=c(4,4,4,2))
+
+for(i in 8:15){
+  plot(samples_pcomp2$x[,1], as.numeric(stats[i,selection]), main=c(paste("PC1 vs.", rownames(stats)[i])), ylab=rownames(stats)[i], xlab="PC1", col=color_selection[-which(color_selection=="black")], cex.main=1, cex=0.8)
+abline(lm(as.numeric(stats[i,selection])~samples_pcomp2$x[,1]))
+mtext(c(paste("R=", round(cor.test(samples_pcomp2$x[,1], as.numeric(stats[i,selection]), method="spearman")$estimate, digits=2), "\t", "\t", "p=", cor.test(samples_pcomp2$x[,1], as.numeric(stats[i,selection]), method="spearman")$p.value)), side=3, cex=0.6)
+}
+
+plot(samples_pcomp2$x[,1], as.numeric(log10(stats[7, selection]+1)), main="PC1 vs. Total no. of reads (log10)", ylab="Total no. of reads (log10)", xlab="PC1", col=color_selection[-which(color_selection=="black")], cex.main=1, cex=0.8)
+abline(lm(as.numeric(log10(stats[7, selection]+1))~samples_pcomp2$x[,1]))
+mtext(c(paste("R=", round(cor.test(samples_pcomp2$x[,1], as.numeric(log10(stats[7, selection]+1)), method="spearman")$estimate, digits=2), "\t", "\t", "p=", cor.test(samples_pcomp2$x[,1], as.numeric(log10(stats[7, selection]+1)), method="spearman")$p.value)), side=3, cex=0.6)
+
+```
+
+Figure 7. PC1 vs. quality
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow=c(3, 3), mar=c(4,4,4,2))
+
+for(i in 8:15){
+  plot(samples_pcomp2$x[,2], as.numeric(stats[i,selection]), main=c(paste("PC2 vs.", rownames(stats)[i])), ylab=rownames(stats)[i], xlab="PC2", col=color_selection[-which(color_selection=="black")], cex.main=1, cex=0.8)
+abline(lm(as.numeric(stats[i,selection])~samples_pcomp2$x[,2]))
+mtext(c(paste("R=", round(cor.test(samples_pcomp2$x[,2], as.numeric(stats[i,selection]), method="spearman")$estimate, digits=2), "\t", "\t", "p=", cor.test(samples_pcomp2$x[,2], as.numeric(stats[i,selection]), method="spearman")$p.value)), side=3, cex=0.6)
+}
+
+
+plot(samples_pcomp2$x[,2], as.numeric(log10(stats[7, selection]+1)), main="PC2 vs. Total no. of reads (log10)", ylab="Total no. of reads (log10)", xlab="PC2", col=color_selection[-which(color_selection=="black")], cex.main=1, cex=0.8)
+abline(lm(as.numeric(log10(stats[7, selection]+1))~samples_pcomp2$x[,2]))
+mtext(c(paste("R=", round(cor.test(samples_pcomp2$x[,2], as.numeric(log10(stats[7, selection]+1)), method="spearman")$estimate, digits=2), "\t", "\t", "p=", cor.test(samples_pcomp2$x[,2], as.numeric(log10(stats[7, selection]+1)), method="spearman")$p.value)), side=3, cex=0.6)
+
+```
+
+Figure 8. PC2 vs. quality
+
+As we wanted to see if PC1 and PC2 were related with samples' position in the MOE, we plotted PC1 vs. PC2 using a color gradient to see samples' position (dorsal-ventral) in the MOE. Then we plotted each of these principal components vs our position indexes and performed Spearman correlation tests.
+
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow=c(1, 1), mar=c(4, 4, 4, 2))
+
+col=colorRampPalette(c("lightblue", "darkblue"))
+#min(sel_positions)
+#max(sel_positions)
+plot(samples_pcomp2$x[,1], samples_pcomp2$x[,2], col=col(96)[sel_positions], xlab="PC1", ylab="PC2", pch=19, cex=1)
+legend("bottomleft", c("Dorsal", "Ventral"), pch=19, col=c("lightblue", "darkblue"), cex=0.8)
+
+#See if PC 1 and 2 correlate with position
+
+par(mfrow=c(1, 2), mar=c(4, 4, 4, 2))
+
+plot(samples_pcomp2$x[,1], sel_positions, xlab="PC1", ylab="Position in the MOE,D-V", pch=19, col=color_selection[-which(color_selection=="black")], cex=0.8, cex.main=1, main="PC1 vs position in MOE")
+#abline(lm(samples_pcomp2$x[,1]~sel_positions))
+mtext(c(paste("R=", round(cor.test(sel_positions, samples_pcomp2$x[,1], method="spearman")$estimate, digits=2), "\t", "\t", "p=", cor.test(sel_positions, samples_pcomp2$x[,1], method="spearman")$p.value)), side=3, cex=0.8)
+
+#### PC2
+
+plot(samples_pcomp2$x[,2], sel_positions, xlab="PC2", ylab="Position in the MOE, D-V", pch=19, col=color_selection[-which(color_selection=="black")], cex=0.8, cex.main=1, main="PC2 vs position in MOE")
+#abline(lm(samples_pcomp2$x[,2]~sel_positions))
+mtext(c(paste("R=", round(cor.test(sel_positions, samples_pcomp2$x[,2], method="spearman")$estimate, digits=2), "\t", "\t", "p=", cor.test(sel_positions, samples_pcomp2$x[,2], method="spearman")$p.value)), side=3, cex=0.8)
+```
+
+Figure 9. Pricipal components' and samples' positions in the MOE.
+
+Differential expression across DV axis
+
+In order to find differentially expressed genes across the DV axis, we scanned our gene expression counts getting the average expression of windows of 10 positions (samples) per gene; we took the minimum and the maximum values for each gene and used DESeq to test if the difference between these means was signifficant. 
+
+
+```{r}
+#Average gene expression in windows of 10 positions
+
+#order normalized by position
+colnames(normalized)<-paste(sel_positions, colnames(normalized))
+normalized<-rbind(normalized, sel_positions)
+normalized<-normalized[,order(sel_positions)]
+
+colnames(selected)<-paste(sel_positions, colnames(selected))
+selected<-rbind(selected, sel_positions)
+selected<-selected[,order(sel_positions)]
+
+min_max<-data.frame(rep(0, 20))
+min_max<-t(min_max)
+means<-data.frame(rep(0, (dim(selected)[2]-9)))
+means<-t(means)
+namesmm<-data.frame(rep(0, 20))
+namesmm<-t(namesmm)
+y<-numeric()
+z<-character()
+
+for(i in 1:dim(selected)[1]){
+  j<-sapply(1:(dim(selected)[2]-9), function(x){mean(selected[i, x:(x+9)])})
+  y[1:10]<-selected[i, which(j==min(j))[1]:(which(j==min(j))[1]+9)]
+  z[1:10]<-colnames(selected)[which(j==min(j))[1]:(which(j==min(j))[1]+9)]
+  y[11:20]<-selected[i, which(j==max(j))[1]:(which(j==max(j))[1]+9)]
+  z[11:20]<-colnames(selected)[which(j==max(j))[1]:(which(j==max(j))[1]+9)]
+  min_max<-rbind(min_max, y)
+  means<-rbind(means, j)
+  namesmm<-rbind(namesmm, z)
+}
+min_max<-min_max[-1,]
+colnames(min_max)<-c(paste("min", 1:10, sep=""), paste("max", 1:10, sep=""))
+rownames(min_max)<-rownames(selected)
+
+namesmm<-namesmm[-1,]
+colnames(namesmm)<-c(paste("min", 1:10, sep=""), paste("max", 1:10, sep=""))
+rownames(namesmm)<-rownames(selected)
+
+means<-means[-1,]
+rownames(means)<-rownames(selected)
+
+group<-c(rep("min", 10), rep("max", 10))
+coldata <- data.frame(row.names=colnames(min_max), group)
+dds1 <- DESeqDataSetFromMatrix(countData=as.matrix(min_max), colData=coldata, design=~group) #transform dataset
+dds1<-DESeq(dds1)
+res<-results(dds1)
+
+resOrdered<-res[order(res$padj),]
+#getwd()
+#write.csv(resOrdered, "./diffexp_windows10.csv")
+#heatmap(normalized[match(rownames(resOrdered)[1:50], rownames(normalized)),])
+heatDEGs<-log10(normalized[match(rownames(resOrdered)[1:50], rownames(normalized)),]+1)
+colnames(heatDEGs)<-normalized[dim(normalized)[1],]
+heatmap.2(heatDEGs, Colv = NA, xlab="Position D-V", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8)
+
+```
+
+Figure 10. Heatmap of expression of top 50 differentially expressed genes across the DV axis with dendrogram clustering genes with similar spatial expression patterns
+
+```{r}
+heatDEGs1<-log10(min_max[match(rownames(resOrdered)[1:50], rownames(min_max)),]+1)
+heatmap.2(heatDEGs1, Rowv = NA, Colv = NA, xlab="", dendrogram ='none', trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8)
+```
+
+Figure 11. Heatmap of expression of top 50 differentially expressed genes in the gene windows with the lowest and highest mean. 
+
+```{r}
+heatDEGs2<-log10(normalized[match(rownames(resOrdered)[1:length(which(resOrdered$padj<0.05))], rownames(normalized)),]+1)
+colnames(heatDEGs2)<-normalized[dim(normalized)[1],]
+heatmap.2(heatDEGs2, Colv = NA, xlab="Position D-V", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8)
+```
+
+Figure 12. Heatmap of all DEGs with dendrogram clustering genes with similar spatial expression patterns
+
+```{r}
+#ORs among DEGs
+
+DEGs<-normalized[match(rownames(resOrdered)[1:length(which(resOrdered$padj<0.05))], rownames(normalized)),]
+colnames(DEGs)<-normalized[dim(normalized)[1],]
+#write.csv(DEGs, "./DEGs_expression.csv")
+
+DEGs<-read.csv("./DEGs_expression.csv", header = TRUE, row.names = 1)
+resOrdered<-read.csv("./diffexp_windows10.csv", header=TRUE, row.names=1)
+
+library(VennDiagram)
+ORs_DEGs_venn<-venn.diagram(list(DEGS=rownames(DEGs), ORs=rownames(resOrdered)[grep("Olfr", rownames(resOrdered))]), fill = c("red", "blue"), hyper.test = TRUE, total.population = 52637, lower.tail = FALSE, alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, cat.pos = c(-10,10), sub.cex = 1.5, filename = NULL, scaled=F)
+
+par(mfrow=c(1, 1), mar=c(4, 4, 4, 4))
+grid.draw(ORs_DEGs_venn)
+```
+
+Figure 13. Venn diagram describing the amount of OR genes among the differentially expressed genes (DEGs)
+
+```{r}
+
+#Clustering
+cor.degs<-cor(t(DEGs),method="spearman") #compute correlation matrix
+test.dist<-as.dist(sqrt(0.5*((1-cor.degs)))) #define distance matrix
+
+
+require(dynamicTreeCut)
+require(WGCNA)
+
+test.clust<-hclust(test.dist, method="average")
+#estimate number of clusters with dynamicTreeCut
+cut2<-cutreeDynamic(test.clust,distM=as.matrix(test.dist), 
+                    minClusterSize=30, method="hybrid",deepSplit = 1 )
+clusters<-labels2colors(cut2) 
+
+names(clusters)<-row.names(DEGs)
+table(clusters)
+
+```
+
+```{r}
+
+#visualize data with tsne
+require(Rtsne)
+set.seed(10)
+test.tsne<-Rtsne(test.dist, is_distance = T)
+plot(test.tsne$Y, col=clusters)
+```
+
+Figure 14. PCA-like plot of DEGs based on their expression pattern across the DV axis. Colors=Clusters
+
+```{r}
+#Genomic positions
+
+genes_data<-read.csv("../interactions_enhancers_ORs/mm10_gene_coords.txt", stringsAsFactors = F, header=T)
+genes_data$length<-genes_data$Gene.end..bp.-genes_data$Gene.start..bp.
+genes_data<-genes_data[order(genes_data$Chromosome.scaffold.name),]
+
+#Clusters by position in the genome
+
+clust<-character()
+for(j in unique(genes_data$Chromosome.scaffold.name)){
+  sel<-which(genes_data$Chromosome.scaffold.name==j)
+  genes_data[sel,]<-genes_data[sel,][order(genes_data[sel,]$Gene.start..bp.),]
+  
+  clust[sel[1]]<-paste(j, ".", 1, sep="")
+  x<-1
+  i<-2
+  thr<-1000000
+  while(i<=length(sel)){
+    if(genes_data$Gene.start..bp.[sel[i]]<=genes_data$Gene.start..bp.[sel[i-1]]+thr){
+      clust[sel[i]]<-paste(j, ".", x, sep="")
+    } else{
+      x<-x+1
+      clust[sel[i]]<-paste(j, ".", x, sep="")
+    }
+    i<-i+1
+  }
+}
+
+genes_data$gen_clust<-clust
+```
+
+```{r}
+#Test if there is an association between genes' position in the genome and their spatial expresssion pattern
+DEGs_data<-genes_data[match(rownames(DEGs), genes_data$Gene.name),]
+DEGs_data$clusters<-clusters
+
+tbl<-table(DEGs_data$gen_clust, DEGs_data$clusters)
+chisq.test(tbl)
+```
+To test if there was an association between genes' spatial expression patterns across the DV axis and their positions in the genome, we ran a Chi-squared test using data from clustering by spatial expression pattern and clustering by genomic position. As the p-value resulting from this test is lower than 0.05, we can say there is an association between the property of being in the same genomic cluster and the property of being in the same expression pattern cluster.
+
+```{r}
+#Expression patterns per cluster
+
+library(matrixStats)
+position<-sub('\\..*', '', colnames(DEGs))
+position<-as.numeric(gsub("X", "", position))
+rm(x)
+norm_degs<-log10(DEGs+1)
+norm_degs<-apply(norm_degs, 1, function(x){(x-min(x))/(max(x)-min(x))})
+norm_degs<-data.frame(position, norm_degs)
+#norm_degs<-t(norm_degs)
+
+library(locfit)
+
+par(mfrow=c(1, 2))
+
+gene<-which(colnames(norm_degs)=="Acsm4")
+plot(locfit(norm_degs[,gene]~lp(norm_degs[,1], deg = 2, nn=1), data=norm_degs), main="Acsm4", xlab="position D-V", ylab="normalized log10 expression")
+
+gene<-which(colnames(norm_degs)=="Olfr727")
+plot(locfit(norm_degs[,gene]~lp(norm_degs[,1], deg = 2, nn=1), data=norm_degs), main="Olfr727", xlab="position D-V", ylab="normalized log10 expression")
+```
+
+Figure 15. Spatial expression patterns of known genes with differential spatial expression. a) Acsm4, b) Olfr727
+
+```{r}
+
+fitted_data<-apply(norm_degs[,2:length(colnames(norm_degs))], 2, function(x){locfit(x~lp(norm_degs[,1], deg = 2, nn=1), data=norm_degs)})
+
+std <- function(x) sd(x)/sqrt(length(x))
+
+library(scales)
+
+par(mfrow=c(3, 2))
+
+
+for(i in unique(clusters)[-length(unique(clusters))]){
+  means<-rowMeans(norm_degs[,-1][,which(clusters==i)])
+  plot(locfit(means~lp(norm_degs[,1], deg=2, nn=1)), ylim=c(0, 1), main=i, ylab="norm. log10 expression", xlab="position D-V")
+#  plot(fitted_data[[rownames(DEGs)[which(clusters==i)][1]]], ylim=c(0, 1), main=i, ylab="norm. log10 expression", type="l", col=i, xlab="position D-V")
+  sapply(rownames(DEGs)[which(clusters==i)], function(x){lines(fitted_data[[x]], col=alpha(i, 0.1))})
+  lines(locfit(means~lp(norm_degs[,1], deg=2, nn=1)), lwd=2)
+}
+
+#for(i in unique(clusters)[-length(unique(clusters))]){
+#  plot(position, colMeans(norm_degs[which(clusters==i),]), ylim=c(0, max(norm_degs)), main=i, ylab="norm. gene expression", type="l", col=i)
+#  polygon(x=c(position, rev(position)), y=c(apply(norm_degs[which(clusters==i),], 2, function(y){mean(y)-std(y)}), rev(apply(norm_degs[which(clusters==i),], 2, function(y){mean(y)+std(y)}))), col=rgb(0.5, 0.6, 0.6, 0.2))
+#}
+
+
+#library(matrixStats)
+#DEORs<-DEGs[grep("Olfr", rownames(DEGs)),]
+#ORs_clusters<-DEGs_data$clusters[grep("Olfr", DEGs_data$Gene.name)]
+#position<-sub('\\..*', '', colnames(DEORs))
+#position<-as.numeric(gsub("X", "", position))
+#rm(x)
+
+```
+
+Figure 16. Average gene expression per cluster across the DV axis and spatial expression pattern per gene in colors. Gene expression values were log10 scaled and then normalized to values between 0 and 1. 
+
+```{r}
+#DEGs_pcomp<-prcomp(log10(DEGs+1), scale=F)
+#plot(DEGs_pcomp$x[,1], DEGs_pcomp$x[,2], xlab="PC1", ylab="PC2", col=clusters)
+#cor.test(DEGs_pcomp$x[,1], DEGs_data$Gene.start..bp., method="spearman")
+
+```
