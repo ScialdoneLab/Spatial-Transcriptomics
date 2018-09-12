@@ -14,7 +14,8 @@ Now we will look at the Dorsal-Ventral axis (DV).
 Quality check
 
 ```{r, echo=FALSE, message=FALSE, warning=FALSE}
-setwd("C:/Users/User/Desktop/lab_helmholtz/spatial_transcriptomics/")
+getwd()
+#setwd("C:/Users/User/Desktop/lab_helmholtz/spatial_transcriptomics/")
 
 #DV_dataset<-read.csv("./gene_counts/DV_dataset.csv", stringsAsFactors = FALSE, header=F, sep="\t")
 #DV_dataset<-DV_dataset[,-seq(3, 454, by=2)]
@@ -44,7 +45,7 @@ rm(DV_dataset)
 
 library(edgeR)
 
-genes_data<-read.csv("../interactions_enhancers_ORs/mm10_gene_coords.txt", stringsAsFactors = F, header=T)
+genes_data<-read.csv("./mm10_gene_coords.txt", stringsAsFactors = F, header=T)
 genes_data$length<-genes_data$Gene.end..bp.-genes_data$Gene.start..bp.
 expr$Gene.stable.ID<-rownames(expr)
 genes_data<-genes_data[match(expr$Gene.stable.ID, genes_data$Gene.stable.ID),]
@@ -129,9 +130,6 @@ position<-gsub("DV..", "", position)
 y<-c(paste(rep(c("A", "B", "C", "D", "E", "F", "G", "H"), 12), rep(c("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"), each=8), sep=""))
 y<-data.frame(y, 1:96, stringsAsFactors = FALSE)
 
-#position<-position[x %% 2 !=0]
-#rm(x)
-
 x<-numeric()
 for(i in 1:length(position)){
   x[i]<-which(y$y==position[i])
@@ -139,12 +137,6 @@ for(i in 1:length(position)){
 
 position<-x
 rm(x)
-
-
-#marker_heat<-cbind(marker_heat, position)
-#marker_heat<-t(marker_heat[order(position),])
-#colnames(marker_heat)<-marker_heat[4, ]
-#marker_heat<-marker_heat[-4,]
 
 heatmap.2(t(as.matrix(marker_heat)), xlab="Position D-V", trace='none', key.title=NA, key.ylab=NA, col=my_palette, cexRow = 0.8)
 x<-heatmap.2(t(as.matrix(marker_heat)), xlab="Position D-V", trace='none', key.title=NA, key.ylab=NA, col=my_palette, cexRow = 0.8)
@@ -175,21 +167,6 @@ col[!is.na(match(colnames(expr), labels(x$colDendrogram[[2]])))]<-"green"
 
 
 selection<-which(col!="black")
-```
-
-```{r, echo=FALSE, message=FALSE}
-
-#DESeq normalisation: It takes the genes that don't have 0s in expression values across samples to calculate the normalization factors SI (norm.val=exp/SI) -> check how many genes dont have 0s across samples [>100])
-
-#ceros_per_gene<-apply(expr, 1, function(x){length(which(x==0))})
-#length(which(ceros_per_gene==0))
-#5
-
-#ceros_per_gene<-apply(expr[,selection], 1, function(x){length(which(x==0))})
-#length(which(ceros_per_gene==0))
-#6
-#1924 with detected genes threshold
-#122 with total no. reads thr.
 ```
 
 The statistics of our selected samples look as follows:
@@ -252,6 +229,13 @@ Figure 5. Number of dorsal (1-48) and ventral (49-96) samples selected
 #rpm normalization
 #normalized<-cpm(selected, normalized.lib.sizes=TRUE)
 #deseq normalization
+
+#DESeq normalisation: It takes the genes that don't have 0s in expression values across samples to calculate the normalization factors SI (norm.val=exp/SI) -> check how many genes dont have 0s across samples [>100])
+
+ceros_per_gene<-apply(selected, 1, function(x){length(which(x==0))})
+length(which(ceros_per_gene==0))
+#280
+
 library(DESeq2)
 batch<-rep("DV1", length(colnames(selected)))
 batch[grep("DV2", colnames(selected))]<-"DV2"
@@ -264,14 +248,14 @@ batch_dat<-t(data.frame(batch1, batch2, batch3))
 colnames(batch_dat)<-c("#Good", "%Good", "#Bad", "%Bad")
 batch_dat
 
-coldata <- data.frame(row.names=colnames(selected), batch)
-dds <- DESeqDataSetFromMatrix(countData=as.matrix(selected), colData=coldata, design=~batch) #transform dataset
-dds<-DESeq(dds)
-normalized<-counts(dds, normalized = TRUE) #get normalised counts
+#coldata <- data.frame(row.names=colnames(selected), batch)
+#dds <- DESeqDataSetFromMatrix(countData=as.matrix(selected), colData=coldata, design=~batch) #transform dataset
+#dds<-DESeq(dds)
+#normalized<-counts(dds, normalized = TRUE) #get normalised counts
 #rownames(normalized)<-genes_data$Gene.name
 #geometric.mean<-function(q){exp(mean(log(q)))}
 #normalized<-apply(normalized, 2, function(i){1000*i/geometric.mean(c(i[rownames(normalized)=="Omp"], i[rownames(normalized)=="Gnal"], i[rownames(normalized)=="Cnga2"]))})
-#write.csv(normalized, "./DV_rightNames_normalized.csv")
+#write.csv(normalized, "./DVnormalized.csv")
 ```
 
 Table 1. Good (selected) and bad (not selected) samples per batch
@@ -281,7 +265,7 @@ Having eliminated the samples with low neuron density, we normalized our data us
 In order to see if the samples clustered in some way based on our expression data, we performed a principal components analysis.
 
 ```{r, echo=FALSE, message=FALSE, warning=FALSE}
-
+normalized<-read.csv("./DVnormalized.csv", header=TRUE, row.names=1, stringsAsFactors = F)
 par(mfrow=c(1, 1), mar=c(4, 4, 4, 4))
 
 #PCA log scale
@@ -379,49 +363,53 @@ colnames(selected)<-paste(sel_positions, colnames(selected))
 selected<-rbind(selected, sel_positions)
 selected<-selected[,order(sel_positions)]
 
-min_max<-data.frame(rep(0, 20))
-min_max<-t(min_max)
-means<-data.frame(rep(0, (dim(selected)[2]-9)))
-means<-t(means)
-namesmm<-data.frame(rep(0, 20))
-namesmm<-t(namesmm)
-y<-numeric()
-z<-character()
+#min_max<-data.frame(rep(0, 20))
+#min_max<-t(min_max)
+#means<-data.frame(rep(0, (dim(selected)[2]-9)))
+#means<-t(means)
+#namesmm<-data.frame(rep(0, 20))
+#namesmm<-t(namesmm)
+#y<-numeric()
+#z<-character()
 
-for(i in 1:dim(selected)[1]){
-  j<-sapply(1:(dim(selected)[2]-9), function(x){mean(selected[i, x:(x+9)])})
-  y[1:10]<-selected[i, which(j==min(j))[1]:(which(j==min(j))[1]+9)]
-  z[1:10]<-colnames(selected)[which(j==min(j))[1]:(which(j==min(j))[1]+9)]
-  y[11:20]<-selected[i, which(j==max(j))[1]:(which(j==max(j))[1]+9)]
-  z[11:20]<-colnames(selected)[which(j==max(j))[1]:(which(j==max(j))[1]+9)]
-  min_max<-rbind(min_max, y)
-  means<-rbind(means, j)
-  namesmm<-rbind(namesmm, z)
-}
-min_max<-min_max[-1,]
-colnames(min_max)<-c(paste("min", 1:10, sep=""), paste("max", 1:10, sep=""))
+#for(i in 1:dim(selected)[1]){
+#  j<-sapply(1:(dim(selected)[2]-9), function(x){mean(selected[i, x:(x+9)])})
+#  y[1:10]<-selected[i, which(j==min(j))[1]:(which(j==min(j))[1]+9)]
+#  z[1:10]<-colnames(selected)[which(j==min(j))[1]:(which(j==min(j))[1]+9)]
+#  y[11:20]<-selected[i, which(j==max(j))[1]:(which(j==max(j))[1]+9)]
+#  z[11:20]<-colnames(selected)[which(j==max(j))[1]:(which(j==max(j))[1]+9)]
+#  min_max<-rbind(min_max, y)
+#  means<-rbind(means, j)
+#  namesmm<-rbind(namesmm, z)
+#}
+#min_max<-min_max[-1,]
+#colnames(min_max)<-c(paste("min", 1:10, sep=""), paste("max", 1:10, sep=""))
+#rownames(min_max)<-rownames(selected)
+
+min_max<-read.csv("./minmax.csv", header=TRUE, stringsAsFactors = F)
+min_max<-data.matrix(min_max)
 rownames(min_max)<-rownames(selected)
+min_max<-min_max[,-1]
 
-namesmm<-namesmm[-1,]
-colnames(namesmm)<-c(paste("min", 1:10, sep=""), paste("max", 1:10, sep=""))
-rownames(namesmm)<-rownames(selected)
 
-means<-means[-1,]
-rownames(means)<-rownames(selected)
+#namesmm<-namesmm[-1,]
+#colnames(namesmm)<-c(paste("min", 1:10, sep=""), paste("max", 1:10, sep=""))
+#rownames(namesmm)<-rownames(selected)
+
+#means<-means[-1,]
+#rownames(means)<-rownames(selected)
 
 group<-c(rep("min", 10), rep("max", 10))
 coldata <- data.frame(row.names=colnames(min_max), group)
-dds1 <- DESeqDataSetFromMatrix(countData=as.matrix(min_max), colData=coldata, design=~group) #transform dataset
+dds1 <- DESeqDataSetFromMatrix(countData=min_max, colData=coldata, design=~group) #transform dataset
 dds1<-DESeq(dds1)
 res<-results(dds1)
 
 resOrdered<-res[order(res$padj),]
-#getwd()
 #write.csv(resOrdered, "./diffexp_windows10.csv")
-#heatmap(normalized[match(rownames(resOrdered)[1:50], rownames(normalized)),])
 heatDEGs<-log10(normalized[match(rownames(resOrdered)[1:50], rownames(normalized)),]+1)
 colnames(heatDEGs)<-normalized[dim(normalized)[1],]
-heatmap.2(heatDEGs, Colv = NA, xlab="Position D-V", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8)
+heatmap.2(as.matrix(heatDEGs), Colv = NA, xlab="Position D-V", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8)
 
 ```
 
@@ -437,7 +425,7 @@ Figure 11. Heatmap of expression of top 50 differentially expressed genes in the
 ```{r}
 heatDEGs2<-log10(normalized[match(rownames(resOrdered)[1:length(which(resOrdered$padj<0.05))], rownames(normalized)),]+1)
 colnames(heatDEGs2)<-normalized[dim(normalized)[1],]
-heatmap.2(heatDEGs2, Colv = NA, xlab="Position D-V", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8)
+heatmap.2(as.matrix(heatDEGs2), Colv = NA, xlab="Position D-V", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8)
 ```
 
 Figure 12. Heatmap of all DEGs with dendrogram clustering genes with similar spatial expression patterns
@@ -448,9 +436,6 @@ Figure 12. Heatmap of all DEGs with dendrogram clustering genes with similar spa
 DEGs<-normalized[match(rownames(resOrdered)[1:length(which(resOrdered$padj<0.05))], rownames(normalized)),]
 colnames(DEGs)<-normalized[dim(normalized)[1],]
 #write.csv(DEGs, "./DEGs_expression.csv")
-
-DEGs<-read.csv("./DEGs_expression.csv", header = TRUE, row.names = 1)
-resOrdered<-read.csv("./diffexp_windows10.csv", header=TRUE, row.names=1)
 
 library(VennDiagram)
 ORs_DEGs_venn<-venn.diagram(list(DEGS=rownames(DEGs), ORs=rownames(resOrdered)[grep("Olfr", rownames(resOrdered))]), fill = c("red", "blue"), hyper.test = TRUE, total.population = 52637, lower.tail = FALSE, alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, cat.pos = c(-10,10), sub.cex = 1.5, filename = NULL, scaled=F)
@@ -464,21 +449,9 @@ Figure 13. Venn diagram describing the amount of OR genes among the differential
 ```{r}
 
 #Clustering
-cor.degs<-cor(t(DEGs),method="spearman") #compute correlation matrix
-test.dist<-as.dist(sqrt(0.5*((1-cor.degs)))) #define distance matrix
-
 
 require(dynamicTreeCut)
 require(WGCNA)
-
-test.clust<-hclust(test.dist, method="average")
-#estimate number of clusters with dynamicTreeCut
-cut2<-cutreeDynamic(test.clust,distM=as.matrix(test.dist), 
-                    minClusterSize=30, method="hybrid",deepSplit = 1 )
-clusters<-labels2colors(cut2) 
-
-names(clusters)<-row.names(DEGs)
-table(clusters)
 
 ```
 
@@ -486,79 +459,42 @@ table(clusters)
 
 #visualize data with tsne
 require(Rtsne)
-set.seed(10)
-test.tsne<-Rtsne(test.dist, is_distance = T)
-plot(test.tsne$Y, col=clusters)
+#set.seed(10)
+#test.tsne<-Rtsne(test.dist, is_distance = T)
+#plot(test.tsne$Y, col=clusters)
 ```
-
-Figure 14. PCA-like plot of DEGs based on their expression pattern across the DV axis. Colors=Clusters
 
 ```{r}
 #Genomic positions
 
-genes_data<-read.csv("../interactions_enhancers_ORs/mm10_gene_coords.txt", stringsAsFactors = F, header=T)
-genes_data$length<-genes_data$Gene.end..bp.-genes_data$Gene.start..bp.
-genes_data<-genes_data[order(genes_data$Chromosome.scaffold.name),]
-
-#Clusters by position in the genome
-
-clust<-character()
-for(j in unique(genes_data$Chromosome.scaffold.name)){
-  sel<-which(genes_data$Chromosome.scaffold.name==j)
-  genes_data[sel,]<-genes_data[sel,][order(genes_data[sel,]$Gene.start..bp.),]
-  
-  clust[sel[1]]<-paste(j, ".", 1, sep="")
-  x<-1
-  i<-2
-  thr<-1000000
-  while(i<=length(sel)){
-    if(genes_data$Gene.start..bp.[sel[i]]<=genes_data$Gene.start..bp.[sel[i-1]]+thr){
-      clust[sel[i]]<-paste(j, ".", x, sep="")
-    } else{
-      x<-x+1
-      clust[sel[i]]<-paste(j, ".", x, sep="")
-    }
-    i<-i+1
-  }
-}
-
-genes_data$gen_clust<-clust
+genes_data<-read.csv("./mm10_gene_coords.txt", stringsAsFactors = F, header=T)
 ```
 
-```{r}
-#Test if there is an association between genes' position in the genome and their spatial expresssion pattern
-DEGs_data<-genes_data[match(rownames(DEGs), genes_data$Gene.name),]
-DEGs_data$clusters<-clusters
-
-tbl<-table(DEGs_data$gen_clust, DEGs_data$clusters)
-chisq.test(tbl)
-```
-To test if there was an association between genes' spatial expression patterns across the DV axis and their positions in the genome, we ran a Chi-squared test using data from clustering by spatial expression pattern and clustering by genomic position. As the p-value resulting from this test is lower than 0.05, we can say there is an association between the property of being in the same genomic cluster and the property of being in the same expression pattern cluster.
 
 ```{r}
-#Expression patterns per cluster
+#Expression patterns of known genes with specific spatial patterns
 
 library(matrixStats)
 position<-sub('\\..*', '', colnames(DEGs))
 position<-as.numeric(gsub("X", "", position))
-rm(x)
 norm_degs<-log10(DEGs+1)
 norm_degs<-apply(norm_degs, 1, function(x){(x-min(x))/(max(x)-min(x))})
 norm_degs<-data.frame(position, norm_degs)
-#norm_degs<-t(norm_degs)
 
 library(locfit)
 
 par(mfrow=c(1, 2))
 
 gene<-which(colnames(norm_degs)=="Acsm4")
-plot(locfit(norm_degs[,gene]~lp(norm_degs[,1], deg = 2, nn=1), data=norm_degs), main="Acsm4", xlab="position D-V", ylab="normalized log10 expression")
+plot(norm_degs[,1], norm_degs[,gene], main="Acsm4", xlab="position D-V", ylab="normalized log10 expression")
+lines(locfit(norm_degs[,gene]~lp(norm_degs[,1], deg = 2, nn=1), data=norm_degs), col="red")
 
 gene<-which(colnames(norm_degs)=="Olfr727")
-plot(locfit(norm_degs[,gene]~lp(norm_degs[,1], deg = 2, nn=1), data=norm_degs), main="Olfr727", xlab="position D-V", ylab="normalized log10 expression")
+plot(norm_degs[,1], norm_degs[,gene], main="Olfr727", xlab="position D-V", ylab="normalized log10 expression")
+lines(locfit(norm_degs[,gene]~lp(norm_degs[,1], deg = 2, nn=1), data=norm_degs), col="red")
 ```
 
-Figure 15. Spatial expression patterns of known genes with differential spatial expression. a) Acsm4, b) Olfr727
+Figure 15. Spatial expression patterns of genes with known patterns. a) Acsm4, b) Olfr727 
 
 ```{r}
 
@@ -568,72 +504,34 @@ std <- function(x) sd(x)/sqrt(length(x))
 
 library(scales)
 
-par(mfrow=c(3, 2))
-
-
-for(i in unique(clusters)[-length(unique(clusters))]){
-  means<-rowMeans(norm_degs[,-1][,which(clusters==i)])
-  plot(locfit(means~lp(norm_degs[,1], deg=2, nn=1)), ylim=c(0, 1), main=i, ylab="norm. log10 expression", xlab="position D-V")
-#  plot(fitted_data[[rownames(DEGs)[which(clusters==i)][1]]], ylim=c(0, 1), main=i, ylab="norm. log10 expression", type="l", col=i, xlab="position D-V")
-  sapply(rownames(DEGs)[which(clusters==i)], function(x){lines(fitted_data[[x]], col=alpha(i, 0.1))})
-  lines(locfit(means~lp(norm_degs[,1], deg=2, nn=1)), lwd=2)
-}
-
-#for(i in unique(clusters)[-length(unique(clusters))]){
-#  plot(position, colMeans(norm_degs[which(clusters==i),]), ylim=c(0, max(norm_degs)), main=i, ylab="norm. gene expression", type="l", col=i)
-#  polygon(x=c(position, rev(position)), y=c(apply(norm_degs[which(clusters==i),], 2, function(y){mean(y)-std(y)}), rev(apply(norm_degs[which(clusters==i),], 2, function(y){mean(y)+std(y)}))), col=rgb(0.5, 0.6, 0.6, 0.2))
-#}
-
-
-#library(matrixStats)
-#DEORs<-DEGs[grep("Olfr", rownames(DEGs)),]
-#ORs_clusters<-DEGs_data$clusters[grep("Olfr", DEGs_data$Gene.name)]
-#position<-sub('\\..*', '', colnames(DEORs))
-#position<-as.numeric(gsub("X", "", position))
-#rm(x)
 
 ```
 
-Figure 16. Average gene expression per cluster across the DV axis and spatial expression pattern per gene in colors. Gene expression values were log10 scaled and then normalized to values between 0 and 1. 
 
 ```{r}
-#DEGs_pcomp<-prcomp(log10(DEGs+1), scale=F)
-#plot(DEGs_pcomp$x[,1], DEGs_pcomp$x[,2], xlab="PC1", ylab="PC2", col=clusters)
-#cor.test(DEGs_pcomp$x[,1], DEGs_data$Gene.start..bp., method="spearman")
 
-DEGs<-read.csv("./DEGs_expression.csv", header = TRUE, row.names = 1, stringsAsFactors = F)
-resOrdered<-read.csv("./diffexp_windows10.csv", header=TRUE, row.names=1, stringsAsFactors = F)
-normalized<-read.csv("./DVnormalized.csv", header=TRUE, row.names=1, stringsAsFactors = F)
-min_max<-read.csv("./minmax.csv", header=TRUE, row.names=1, stringsAsFactors = F)
+#look at not differentially expressed ORs
 
-#Spatial expression patterns of differentially expressed ORs
 heatDEORs<-log10(normalized[match(rownames(resOrdered)[grep("Olfr", rownames(resOrdered)[resOrdered$padj<0.05])], rownames(normalized)),]+1)
 colnames(heatDEORs)<-normalized[dim(normalized)[1],]
-heatmap.2(heatDEORs, Colv = NA, xlab="Position D-V", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8, Rowv = F)
+heatmap.2(as.matrix(heatDEORs), Colv = NA, xlab="Position D-V", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8, Rowv = F)
 
-#Spatial expression patterns of non differentially expressed ORs
 heatNdeORs<-log10(normalized[match(rownames(resOrdered)[grep("Olfr", rownames(resOrdered)[resOrdered$padj>=0.05])], rownames(normalized)),]+1)
 colnames(heatNdeORs)<-normalized[dim(normalized)[1],]
-heatmap.2(heatNdeORs, Colv = NA, xlab="Position D-V", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8, Rowv = F)
-
-#Spatial expression patterns of OSN markers
-OSN<-as.data.frame(normalized[rownames(normalized)=="Omp",])
-for(marker in c("Gnal", "Cnga2")){
-  OSN<-cbind(OSN, normalized[rownames(normalized)==marker,])
-}
-colnames(OSN)<-c("Omp", "Gnal", "Cnga2")
-
-heatOSN<-t(log10(OSN+1))
-colnames(heatOSN)<-normalized[dim(normalized)[1],]
-heatmap.2(heatOSN, Colv = NA, xlab="Position D-V", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8, Rowv = F)
+heatmap.2(as.matrix(heatNdeORs), Colv = NA, xlab="Position D-V", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=my_palette, cexRow = 0.8, cexCol = 0.8, Rowv = F)
 ```
 
 Figure 17. Spatial expression patterns of ORs. a) Differentially expressed ORs. b) Non-differentially expressed ORs
 
 ```{r}
-#Clustering by differentially expressed ORs
+#Clustering by fitted data from differentially expressed ORs 
 
-deORs<-DEGs[grep("Olfr", rownames(DEGs)),]
+#deORs<-DEGs[grep("Olfr", rownames(DEGs)),]
+deORs<-fitted_data[grep("Olfr", names(fitted_data))]
+deORs<-sapply(1:length(deORs), function(x){predict(deORs[[x]],  c(1:72))})
+colnames(deORs)<-names(fitted_data[grep("Olfr", names(fitted_data))])
+deORs<-t(deORs)
+
 cor.deORs<-cor(t(deORs),method="spearman") #compute correlation matrix
 test.dist<-as.dist(sqrt(0.5*((1-cor.deORs)))) #define distance matrix
 
@@ -666,30 +564,21 @@ Figure 18. Tsne plot for differentially expressed ORs. Colors = clusters
 #Expression patterns per cluster
 
 library(matrixStats)
-position<-sub('\\..*', '', colnames(deORs))
-position<-as.numeric(gsub("X", "", position))
-norm_deORs<-log10(deORs+1)
-norm_deORs<-apply(norm_deORs, 1, function(x){(x-min(x))/(max(x)-min(x))})
-norm_deORs<-data.frame(position, norm_deORs)
-#norm_degs<-t(norm_degs)
-
-library(locfit)
-
-fitted_data<-apply(norm_deORs[,2:length(colnames(norm_deORs))], 2, function(x){locfit(x~lp(norm_deORs[,1], deg = 2, nn=1), data=norm_deORs)})
+position<-1:dim(deORs)[2]
 
 std <- function(x) sd(x)/sqrt(length(x))
 
 library(scales)
 
-par(mfrow=c(2, 2))
+par(mfrow=c(2, 3))
 
 
 for(i in unique(clusters_deORs)){
-  means<-rowMeans(norm_deORs[,-1][,which(clusters_deORs==i)])
-  plot(locfit(means~lp(norm_deORs[,1], deg=2, nn=1)), ylim=c(0, 1), main=i, ylab="norm. log10 expression", xlab="position D-V")
+  means<-colMeans(deORs[which(clusters_deORs==i),])
+  plot(means, ylim=c(0, 1), main=i, ylab="fitted norm. log10 expression", xlab="position D-V")
 #  plot(fitted_data[[rownames(DEGs)[which(clusters==i)][1]]], ylim=c(0, 1), main=i, ylab="norm. log10 expression", type="l", col=i, xlab="position D-V")
-  sapply(rownames(deORs)[which(clusters_deORs==i)], function(x){lines(fitted_data[[x]], col=alpha(i, 0.1))})
-  lines(locfit(means~lp(norm_deORs[,1], deg=2, nn=1)), lwd=2)
+  sapply(rownames(deORs)[which(clusters_deORs==i)], function(x){lines(deORs[x,], col=alpha(i, 0.1))})
+  lines(means, lwd=2)
 }
 
 ```
@@ -736,10 +625,13 @@ ORs_data$gen_clust<-clust
 
 ```{r}
 #Test if there is an association between genes' position in the genome and their spatial expresssion pattern
-unique(clusters_deORs)
+
 deORs_data<-ORs_data[match(rownames(deORs), ORs_data$Gene.name),]
 deORs_data$clusters<-clusters_deORs
 
 tbl<-table(deORs_data$gen_clust, deORs_data$clusters)
 chisq.test(tbl)
+tbl
 ```
+
+To test if there was an association between genes' spatial expression patterns across the DV axis and their positions in the genome, we ran a Chi-squared test using data from clustering by spatial expression pattern and clustering by genomic position. As the p-value resulting from this test is lower than 0.05, we can say there is an association between the property of being in the same genomic cluster and the property of being in the same expression pattern cluster.
