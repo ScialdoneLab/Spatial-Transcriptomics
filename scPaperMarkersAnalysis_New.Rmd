@@ -1,0 +1,1065 @@
+---
+title: "SC paper markers analysis"
+author: "Mayra L. Ruiz Tejada Segura"
+date: "16/04/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Functions, echo=FALSE, message=FALSE, warning=FALSE}
+library(edgeR)
+library(viridis)
+library(gplots)
+library(RColorBrewer)
+library(scales)
+library(scran)
+library(tseries)
+library(fUnitRoots)
+library(lmtest)
+library(hwwntest)
+require(dynamicTreeCut)
+require(WGCNA)
+require(Rtsne)
+library(matrixStats)
+library(locfit)
+library(umap)
+library(karyoploteR)
+library(VennDiagram)
+library(ggplot2)
+
+rpm<-function(x){x*1000000/sum(x)} #get reads per million
+
+getHTseqDataQCstats<-function(statsData, expressionData, totalNoReads, genomic_features){ 
+  #statsData=Dataframe containing the 5 quality statistics htseq returns at the end of counts matrices (no_feature, ambiguous, tooLowaQual, not_aligned and alignment_not_unique), expressionData=the rest of htseq dataset without qc stats, totalNoReads=vector containing total number of reads per sample, genomic_features=dataframe of genomic features of genes in expression matrix with minimum one column called "Chromosome.scaffold.name"
+  
+  statsData[6,]<-apply(expressionData, 2, sum)
+rownames(statsData)[6]<-"__uniquelyAligned"
+
+  statsData[7,]<-totalNoReads
+  rownames(statsData)[7]<-"__total"
+
+  statsData[8,]<-100*statsData[6,]/statsData[7,]
+  rownames(statsData)[8]<-"__percent_uniquelyMapped"
+
+  statsData[9,]<-100*statsData[1,]/statsData[6,]
+  rownames(statsData)[9]<-"__percent_uniqueNoFeature"
+
+  statsData[10,]<-100*statsData[2,]/statsData[6,]
+  rownames(statsData)[10]<-"__percent_uniqueAmbiguous"
+
+  statsData[11,]<-apply(apply(expressionData, 2, rpm), 2, function(x){length(which(x>10))})
+  rownames(statsData)[11]<-"__detected_genes"
+
+  statsData[12,]<-100*apply(expressionData[which(genomic_features$Chromosome.scaffold.name=="MT"),], 2, sum)/statsData[6,]
+  rownames(statsData)[12]<-"__percent_uniqueReads_mapped_to_mit"
+  
+  return(statsData)
+}
+
+plotQCstats<-function(statsData, rows, x, xlab, col, legend_names, legend_colors, ycut, xcut){ #plot some QC stats
+  #statsData=stats QC data frame got before, rows=vector with row indexes from rows of statsData that we want to plot, x=values we want to have in x axis, xlab, col=vector of colors for each sample, legend_names=meaning of each color, legend_colors=colors used for the samples, ycut and xcut = vectors of quality thresholds for axis y and x of each plot
+  count=1
+  for(i in rows){
+    plot(x, as.numeric(stats[i,]), main=rownames(statsData)[i], ylab="", xlab=xlab, col=alpha(col, 0.3), pch=19)
+    abline(h=ycut[count])
+    abline(v=xcut[count])
+    count=count+1
+  }
+
+  plot(1, type="n", axes=FALSE, xlab="", ylab="")
+  legend("bottomright", legend_names, pch=19, col=alpha(legend_colors, 0.3))
+}
+
+getSamplesPerBatch<-function(batchVector, totalSamplesPerBatch){ #get numbers and percentages of good and bad samples per batch
+  #batchVector=Vector indicating the batch each sample comes from, totalSamplesPerBatch= named vector containing total number of samples per batch
+  
+  batch_data<-data.frame(matrix(NA, nrow=length(unique(batchVector)), ncol=4))
+  colnames(batch_data)<-c("#Good", "%Good", "#Bad", "%Bad")
+  rownames(batch_data)<-sort(unique(batchVector))
+  for(i in rownames(batch_data)){
+    batch_data[i, ]<-c(length(batchVector[grep(i, batchVector)]), 100*length(batchVector[grep(i, batchVector)])/totalSamplesPerBatch[i], totalSamplesPerBatch[i]-length(batch[grep(i, batchVector)]), 100-(100*length(batchVector[grep(i, batchVector)])/totalSamplesPerBatch[i]))
+  }
+  return(batch_data)
+}
+
+filterGenes<-function(data, minPercentSamples, minNormCounts){ 
+  #data=matrix of (normalized) counts with rows=genes, minNormCounts=minimum number of counts a sample must have of a gene to count it as expressed,  minPercentSamples=minimum percentage of samples that must express a gene to keep it
+  emptySamplesNo<-apply(data, 1, function(x){length(which(x<minNormCounts))})
+  expGenes<-which(emptySamplesNo<=round((1-minPercentSamples/100)*dim(data)[2]))
+  data<-data[expGenes,]
+  return(data)
+}
+
+getHVGs<-function(data){ #get Highly variable genes from dataset using log10 (normalized) counts as a starting point
+  log_data<-as.matrix(log10(data+1))
+  fit <- trendVar(as.matrix(log10(data+1)))
+  decomp <- decomposeVar(log_data, fit)
+  decomp<-decomp[order(decomp$bio, decreasing=TRUE),]
+  return(data[match(rownames(decomp)[which(decomp$FDR<0.05)], rownames(data)),] )
+}
+
+getHVGs<-function(data){ #get Highly variable genes from dataset using log10 (normalized) counts as a starting point
+  log_data<-as.matrix(log10(data+1))
+  decomp <- modelGeneVar(log_data)
+  #top.hvgs <- getTopHVGs(decomp, fdr.threshold=0.1)
+  top.hvgs <- getTopHVGs(decomp)
+  return(data[match(top.hvgs, rownames(data)),] )
+}
+
+plotXYcorrelation<-function(x, y, main, xlab, ylab, col){
+  #x=values in x axis, y=values in y axis, xlab=x axis name, ylab=y axis name, col=vector of colors per sample
+  plot(x, y, main=main, ylab=ylab, xlab=xlab, col=alpha(col, 0.3), cex.main=1, cex=0.8, pch=19)
+  abline(lm(y~x))
+  mtext(c(paste("R=", round(cor.test(x, y, method="spearman")$estimate, digits=2), "\t", "\t", "p=", cor.test(x, y, method="spearman")$p.value)), side=3, cex=0.6)
+}
+
+plotGenesInEachBatch<-function(data, genes, x, batches, batchColors, xlab, ylab, ylim){
+  #x=values for each sample in data (samples in columns) that can go in the x axis (from all batches), data=(normalized) gene expression data: genes=rows, samples=columns, genes=genes to be plotted, batches=a pattern pewr batch (which must be present in the column names of data to identify samples from each batch), batchColors=colors to use per batch, xlab, ylab=labels for x and y axes
+  for(gene in genes){
+    plot(x[grep(batches[1], colnames(data))], data[gene,grep(batches[1], colnames(data))], xlim=c(0, max(sapply(batches, function(j){length(grep(j, colnames(data)))}))), col=alpha(batchColors[1], 0.3), main=gene, xlab=xlab, ylab=ylab, pch=19, ylim=ylim)
+    for(i in 2:length(batches)){
+      lines(x[grep(batches[i], colnames(data))], data[gene,grep(batches[i], colnames(data))], type="p", col=alpha(batchColors[i], 0.3), pch=19)
+    }
+  }
+
+  plot(1, type="n", axes=FALSE, xlab="", ylab="")
+  legend("topright", batches, pch=19, col=alpha(batchColors, 0.3))
+}
+
+
+batchSubset<-function(data, batch, positions){
+  #data=(normalized) gene expression data: genes=rows, samples=columns, position=positions for each sample in data (from all batches), batch=a pattern for the batch we want (which must be present in the column names of data to identify samples from that batch)
+  tmp<-matrix(NA, dim(data)[1], max(positions[grep(batch, colnames(data))]))
+  tmp[,positions[grep(batch, colnames(data))]]<-data[, grep(batch, colnames(data))]
+  colnames(tmp)<-paste(batch, 1:max(positions[grep(batch, colnames(data))]), sep="-")
+  rownames(tmp)<-rownames(data)
+  return(tmp)
+}
+
+findEqPositions<-function(df1, df2){ #find which positions from df2 correspond to the ones in df1 df1 and df2 are data frames of gene expression where each row is a gene and each column is a position. Empty positions are columns of NAs. This returns a list of 3 elements: the range of positions of df2 which is equivalent to positions in df1, the vector of correlation coefficients for all genes in df1 and df2 taking the range of slices from df2 that give the maximum sum of correlations when compared to slices in df1, and the data frame of correlation coefficients for all genes in df1 and df2 taking all possible ranges of slices
+  corsDF<-as.data.frame(rep(0, 1000))
+  corsMax<-rep(0, min(dim(df1)[2], dim(df2)[2]))
+  maxCorsSum<-0
+  eqRange<-c(firstPos=1, lastPos=dim(df1)[2])
+  for(i in 1:(1+dim(df2)[2]-dim(df1)[2])){
+    cors<-sapply(1:1000, function(x){cor(df1[x,], df2[x,i:(dim(df1)[2]+i-1)], use="complete.obs")})
+    corsDF<-cbind(corsDF, cors)
+    if(sum(cors, na.rm=T)>maxCorsSum){
+      maxCorsSum<-sum(cors, na.rm=T)
+      corsMax=cors
+      eqRange<-c(firstPos=i, lastPos=dim(df1)[2]+i-1)
+    }
+  }
+  colnames(corsDF)<-paste("Slice1=", 0:(dim(corsDF)[2]-1), sep="")
+  return(list(eqRange, corsMax, corsDF))
+}
+
+std <- function(x) sd(x)/sqrt(length(x)) #standard error of the mean
+
+plotMeanDetectedGenesPerPosition<-function(data, thresh, positions, errorBars, xlab){
+  #data= (normalized) counts matrix, thresh=number of counts a gene has to have to be considered detected in a sample, positions=vector indicating the position pf each sample on data, errorBars="SE" or "SD", xlab=x axis label
+  detGenes<-apply(data, 2, function(x){length(which(x>thresh))})
+  meanDetGenes<-sapply(unique(positions), function(x){mean(detGenes[which(positions==x)])})
+  seDetGenes<-sapply(unique(positions), function(x){std(detGenes[which(positions==x)])})
+  sdvDetGenes<-sapply(unique(positions), function(x){sd(detGenes[which(positions==x)])})
+  plot(1:length(unique(positions)), meanDetGenes, pch=19, xlab=xlab, ylab="no. Detected genes", ylim=c(0, dim(data)[1]))
+  if(errorBars=="SE"){
+    arrows(1:length(unique(positions)), meanDetGenes-seDetGenes, 1:length(unique(positions)), meanDetGenes+seDetGenes, length=0.05, angle=90, code=3)
+  }else{
+    arrows(1:length(unique(positions)), meanDetGenes-sdvDetGenes, 1:length(unique(positions)), meanDetGenes+sdvDetGenes, length=0.05, angle=90, code=3)
+  }
+}
+
+gm_mean = function(x, na.rm=TRUE){ #geometric mean
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+
+normalizeByMarkersGeoMean<-function(data, markers){
+  #data= (normalized) counts matrix, markers=markers to use for normalizsing
+  norm_markers<-t(data[markers,])
+  markersGeoMeans<-apply(norm_markers, 1, gm_mean)
+  normData<-t(apply(data, 1, function(x){x*mean(markersGeoMeans)/markersGeoMeans}))
+  return(normData)
+}
+
+binarizeData<-function(data){ #make binary matrix of expression depending on the gene having an expression value higher than its median asross samples or not
+  #data=counts matrix to binarize rows=genes columns=samples
+  x<-rep(NA, dim(data)[2])
+  pvals<-rep(NA, dim(data)[1])
+  binMat<-matrix(NA, dim(data)[1], dim(data)[2])
+  colnames(binMat)<-colnames(data)
+  rownames(binMat)<-rownames(data)
+  for(i in 1:dim(data)[1]){
+    x[data[i,]<=median(data[i,])]<-0
+    x[data[i,]>median(data[i,])]<-1
+    binMat[i,]<-x
+  }
+  return(binMat)
+}
+
+
+getDEGcandidatesFlags<-function(data, groupSize, minMinsMean4FC, minMaxsMean4FC, minFC, minDiff){#get binary vector to classify genes to decide if they will be evaluated or not depending on their expression variance in groups of samples of minimum and maximum expression. Fold change between maximum expression group and minimum expression group, and/or means difference between these groups can be used
+  #data=counts matrix rows=genes, columns=samples, groupSize=number of samples per group compared, minFC=minimum fold change between groups, minMinsMean4FC=minimum value for the mean of the group of minimum expression values to look at groups fold change, minMaxsMean4FC=minimum value for the mean of the group of maximum expression values to look at groups fold change, minFC=minimum fold change in expression these groups of samples must have for a gene to be a candidate for analysis, minDiff=minimum difference between the mean expression of these groups of samples for a gene to be a candidate for analysis
+  flags<-rep(0, dim(data)[1])
+  for(i in 1:length(flags)){
+    mins<-sort(data[i,])[1:groupSize]
+    maxs<-sort(data[i,])[(dim(data)[2]-(groupSize-1)):dim(data)[2]]
+    if((mean(mins)>=minMinsMean4FC)&(mean(maxs)>=minMaxsMean4FC)){
+      if((mean(maxs)/mean(mins))>=minFC){flags[i]<-1}
+    }else{
+      if((mean(maxs)-mean(mins))>minDiff){flags[i]<-1}
+    }
+  }
+  return(flags)
+}
+
+autocorrelationTest<-function(data, maxLag, filter){#perform autocorrelations for each row (gene) and perform Ljung-Box test to know if these values are signifficantly different from what would be expected by chance, genes with FDR=2 were not evaluated
+  #data=counts matrix with rows=genes and columns=samples, maxLag=maximum lag between autocorrelated positions, filter=vector of 0s and 1s saying if that gene will be evaluated (1) or not (0)
+  autocor<-apply(data[(filter==1),], 1, function(x){Box.test(ts(x), type = "Ljung-Box", lag=maxLag)})
+  genes.table<-data.frame(genes.names=rownames(data))
+  genes.table$filter<-filter
+  genes.table$genes.pvals=rep(2, length(filter))
+  genes.table$genes.pvals[genes.table$filter==1]<-sapply(1:length(autocor), function(x){autocor[[x]]$p.value})
+  genes.table$FDR<-2
+  genes.table$FDR[genes.table$filter==1]<-p.adjust(genes.table$genes.pvals[genes.table$filter==1], method="fdr")
+
+  genes.table<-genes.table[order(genes.table$FDR),]
+  return(genes.table)
+}
+
+normBetween0and1<-function(x){(x-min(x))/(max(x)-min(x))}
+
+plotMeanPatternPerCluster<-function(data, clusters, ylim, ylab, xlab){
+  #data=counts matrix with rows=genes and columns=samples or positions, clusters=named vector containing the clusters (by colors) to which each gene belongs with names=genes, ylim=limits for y axis, ylab and xlab = labels for y and x axes respectively
+  for(i in unique(clusters)){
+    means<-colMeans(data[which(clusters==i),])
+    plot(means, ylim=ylim, main=i, ylab=ylab, xlab=xlab, type="l")
+    sapply(rownames(data)[which(clusters==i)], function(x){lines(data[x,], col=alpha(i, 0.1))})
+    lines(means, lwd=2)
+  }
+}
+
+getMaxPositionPerCluster<-function(data, clusters){
+  #data=counts matrix with rows=genes and columns=samples or positions, clusters=named vector containing the clusters (by colors) to which each gene belongs with names=genes
+  maxPos<-numeric(length(unique(clusters)))
+  names(maxPos)<-unique(clusters)
+  c=1
+  for(i in unique(clusters)){
+    means<-colMeans(data[which(clusters==i),])
+    maxPos[c]<-which(means==max(means))
+    c=c+1
+  }
+  return(maxPos)
+}
+
+plotClusterJitter<-function(x, y, xlabels, col, xlab, ylab){
+  #x=values in x axis, y=values in y axis, slabels=labels for each element in x axis, col=color per dot, xlab and ylab =label for x and y axes
+  plot(y ~ jitter(x, 1), pch = 19, axes=FALSE, col=alpha(col, 0.3), xlab=xlab, ylab=ylab)
+  axis(1, at=unique(sort(x)), labels=xlabels)
+  axis(2)
+}
+
+assignGenomicClusters<-function(data, maxDist, chromosomesColName, startPosColName){
+  #data=data frame with genes' genomic features, maxDist=maximum distance between positions in one and another gene, chromosomesColName=name of the column where chromosome to whicg each gene belongs is indicated, startPosColName=name of column of data with gene start positions
+  clust<-character()
+  for(j in unique(data[,chromosomesColName])){
+    sel<-which(data[,chromosomesColName]==j)
+    data[sel,]<-data[sel,][order(data[sel, startPosColName]),]
+    clust[sel[1]]<-paste(j, ".", 1, sep="")
+    x<-1
+    i<-2
+    thr<-maxDist
+    while(i<=length(sel)){
+      if(data[sel[i], startPosColName]<=data[sel[i-1], startPosColName]+thr){
+        clust[sel[i]]<-paste(j, ".", x, sep="")
+      } else{
+        x<-x+1
+        clust[sel[i]]<-paste(j, ".", x, sep="")
+      }
+      i<-i+1
+    }
+  }
+  return(clust)
+}
+
+plotGenesFromCluster<-function(data, cluster, clustersColName, chromosomesColName, startPosColName, endPosColName, genome, main){#Visualize genes from one cluster in the Karyoplot
+  #data=data frame with genes' genomic features, cluster=name of the cluster we want to visualize in the karyoplot, clustersColName=name of column containing clusters, chromosomesColName=name of the column where chromosome to whicg each gene belongs is indicated, startPosColName=name of column of data with gene start positions, endPosColName=name of column of data with gene end positions, genome=name of the genome version used to align eg:"mm10"
+  clustData<-data[which(data[,clustersColName]==cluster),]
+  kpClust <- toGRanges(data.frame(chr=paste("chr", clustData[,chromosomesColName], sep=""), start=clustData[,startPosColName], end=clustData[,endPosColName]))
+  kp1 <- plotKaryotype(genome=genome, main=main)
+  kpPlotRegions(kp1, kpClust, col=clustData[,clustersColName])
+}
+
+
+```
+
+##QC all axes together
+
+```{r readData2, echo=FALSE, message=FALSE, warning=FALSE}
+
+##LML
+
+totalReadsLML<-read.csv("./LML_totalReads_G99.csv", header=FALSE, stringsAsFactors = FALSE)
+totalReadsLML<-gsub("\\|", "\\,", totalReadsLML)
+totalReadsLML<-gsub("\t", "", totalReadsLML)
+totalReadsLML<-gsub(" ", "", totalReadsLML)
+totalReadsLML<-strsplit(totalReadsLML, split = ",")
+totalReadsLML<-as.numeric(totalReadsLML[[1]][-1])
+
+LML_dataset<-read.csv("./LML_datasetNew_G99.csv", header=TRUE, stringsAsFactors = FALSE, row.names = 1)
+
+exprLML<-as.matrix(LML_dataset[1:(dim(LML_dataset)[1]-5),])
+statsLML<-LML_dataset[(dim(LML_dataset)[1]-4):dim(LML_dataset)[1],]
+
+rm(LML_dataset)
+
+genes_data<-read.csv("./mmus-GRCm38.p6_G99.csv", stringsAsFactors = F, header=T)
+genes_data$length<-genes_data$Gene.end..bp.-genes_data$Gene.start..bp.
+genes_data<-genes_data[match(rownames(exprLML), genes_data$Gene.name),]
+
+statsLML<-getHTseqDataQCstats(statsData=statsLML, expressionData=exprLML, totalNoReads=totalReadsLML, genomic_features=genes_data)
+
+colLML<-rep("red", dim(exprLML)[2])
+colLML[60:124]<-"blue" #LML2
+colLML[125:190]<-"green" #LML3
+
+##AP
+
+totalReadsAP<-read.csv("./PA_totalReads_G99.csv", header=FALSE, stringsAsFactors = FALSE)
+totalReadsAP<-gsub("\\|", "\\,", totalReadsAP)
+totalReadsAP<-gsub("\t", "", totalReadsAP)
+totalReadsAP<-gsub(" ", "", totalReadsAP)
+totalReadsAP<-strsplit(totalReadsAP, split = ",")
+totalReadsAP<-as.numeric(totalReadsAP[[1]][-1])
+
+AP_dataset<-read.csv("./PA_datasetNew_G99.csv", header=TRUE, stringsAsFactors = FALSE, row.names = 1)
+
+exprAP<-as.matrix(AP_dataset[1:(dim(AP_dataset)[1]-5),])
+statsAP<-AP_dataset[(dim(AP_dataset)[1]-4):dim(AP_dataset)[1],]
+
+rm(AP_dataset)
+
+statsAP<-getHTseqDataQCstats(statsData=statsAP, expressionData=exprAP, totalNoReads=totalReadsAP, genomic_features=genes_data)
+
+colAP<-rep("darkred", dim(exprAP)[2])
+colAP[91:170]<-"darkblue" #AP2
+colAP[171:248]<-"darkgreen" #AP3
+
+##DV
+
+totalReadsDV<-read.csv("./DV_totalReads_G99.csv", header=FALSE, stringsAsFactors = FALSE)
+totalReadsDV<-gsub("\\|", "\\,", totalReadsDV)
+totalReadsDV<-gsub("\t", "", totalReadsDV)
+totalReadsDV<-gsub(" ", "", totalReadsDV)
+totalReadsDV<-strsplit(totalReadsDV, split = ",")
+totalReadsDV<-as.numeric(totalReadsDV[[1]][-1])
+totalReadsDV<-totalReadsDV[-(118:201)]
+
+totalReadsXIDV1<-read.csv("./XIDV1_totalReads_G99.csv", header=FALSE, stringsAsFactors = FALSE)
+totalReadsXIDV1<-gsub("\\|", "\\,", totalReadsXIDV1)
+totalReadsXIDV1<-gsub("\t", "", totalReadsXIDV1)
+totalReadsXIDV1<-gsub(" ", "", totalReadsXIDV1)
+totalReadsXIDV1<-strsplit(totalReadsXIDV1, split = ",")
+totalReadsXIDV1<-as.numeric(totalReadsXIDV1[[1]][-1])
+
+totalReadsDV<-c(totalReadsDV, totalReadsXIDV1)
+
+DV_dataset<-read.csv("./DV_datasetNew_G99.csv", header=TRUE, stringsAsFactors = FALSE, row.names = 1)
+DV_dataset<-DV_dataset[,-(118:201)]
+
+XIDV1_dataset<-read.csv("./XIDV1_datasetNew_G99.csv", header=TRUE, stringsAsFactors = FALSE, row.names = 1)
+
+DV_dataset<-cbind(DV_dataset, XIDV1_dataset)
+
+exprDV<-as.matrix(DV_dataset[1:(dim(DV_dataset)[1]-5),])
+statsDV<-DV_dataset[(dim(DV_dataset)[1]-4):dim(DV_dataset)[1],]
+
+rm(DV_dataset)
+
+statsDV<-getHTseqDataQCstats(statsData=statsDV, expressionData=exprDV, totalNoReads=totalReadsDV, genomic_features=genes_data)
+
+colDV<-rep("red", dim(exprDV)[2])
+colDV[63:117]<-"blue" #DV2
+colDV[118:183]<-"green" #DV3 = XIDV1
+
+##
+
+expr<-cbind(exprLML, exprAP, exprDV)
+stats<-cbind(statsLML, statsAP, statsDV)
+col=c(colLML, colAP, colDV)
+```
+
+
+
+```{r Quality_checkMod, echo=FALSE, message=FALSE, warning=FALSE}
+
+#col[grep("LML2", names(stats))]<-"blue"
+#col[grep("LML3", names(stats))]<-"green"
+ythresholds<-rep(NA, 5)
+xthresholds<-rep(NA, 5)
+
+par(mfrow=c(3, 2), mar=c(4,2,2,2))
+op <- par(cex = 0.4)
+
+plotQCstats(statsData = stats, rows = c(8:12), x=as.numeric(log10(stats[7,]+1)), xlab="log10(total reads+1)", col=col, legend_names=c("LML1", "LML2", "LML3", "AP1", "AP2", "AP3", "DV1", "DV2", "DV3"), legend_colors=c("red", "blue", "green", "darkred", "darkblue", "darkgreen", "pink", "lightblue", "lightgreen"), ycut = ythresholds, xcut = xthresholds)
+```
+
+**Figure 1.** Quality statistics of samples
+
+The quality of the dataset looks ok, not many genes mapped to mitochondrial genome and not many low quality reads. We have high percentages of not aligned reads though. I decided to filter the samples that had less than 15% aligned reads to not eliminate so many samples (although I already lose many in that step). 
+
+We looked at olfactory neurons' maturity markers to select samples based on neuron density.
+
+```{r OSN_markers, echo=FALSE, message=FALSE, warning=FALSE}
+marker_heat<-log10(expr[c("Omp", "Gnal", "Cnga2"),]+1)
+
+#pdf(file = "./figures_pdf2/FigS1E.pdf", width=5, height = 5)
+heatmap.2(as.matrix(marker_heat), xlab="", trace='none', key.title=NA, key.ylab=NA, col=viridis(length(seq(0,ceiling(max(marker_heat)),0.1))-1), cexRow = 0.8, key.xlab = "log10geneExp", labCol = FALSE, breaks=seq(0,ceiling(max(marker_heat)),0.1))
+#dev.off()
+
+```
+
+**Figure 2.** Neuronal markers expression heatmap.
+
+
+##Sample selection
+
+As mentioned before, I eliminated the samples with less than 15% mapped reads, the ones with less than 1000 detected genes, the ones with more than 8% mitochondrial reads and the ones with log(totalNo.ofReads)<5.5.
+
+I also eliminated the ones that don't express the 3 neuronal markers, which was just one, but it seems to be a strong outlier as having that sample changed the PCA results a lot.
+
+```{r Selection, echo=FALSE, message=FALSE}
+
+#Selection
+
+#col=c(rep("green", dim(expr)[2]))
+
+col[which(stats[8,]<50)]<-"black" # %uniquely mapped reads >= 50
+col[which(stats[11,]<4000)]<-"black" # detected genes >=4000
+col[which(stats[12,]>20)]<-"black" # %unique reads mapped to mit. <= 20
+col[as.numeric(log10(stats[7,]+1))<5]<-"black" #log(totalNumberofReads+1)>=5
+#col[expr["Omp",]==0]<-"black"
+#col[expr["Gnal",]==0]<-"black"
+#col[expr["Cnga2",]==0]<-"black"
+col[expr["Omp",]<1]<-"black"
+col[expr["Gnal",]<1]<-"black"
+col[expr["Cnga2",]<1]<-"black"
+
+```
+
+The statistics of our selected samples look as follows:
+
+```{r Selected_QStats, echo=FALSE, message=FALSE}
+
+ythresholds<-rep(NA, 5)
+ythresholds[1]<-50
+ythresholds[4]<-4000
+ythresholds[5]<-20
+xthresholds<-rep(NA, 5)
+xthresholds<-rep(5, 5)
+
+par(mfrow=c(3, 2), mar=c(4,2,2,2))
+op <- par(cex = 0.4)
+
+plotQCstats(statsData = stats, rows = c(8:12), x=as.numeric(log10(stats[7,]+1)), xlab="log10(total reads+1)", col=col, legend_names=c("Not Selected", "Selected_LML1", "Selected_LML2", "Selected_LML3", "Selected_AP1", "Selected_AP2", "Selected_AP3", "Selected_DV1", "Selected_DV2", "Selected_DV3"), legend_colors=c("black", "red", "blue", "green", "darkred", "darkblue", "darkgreen", "pink", "lightblue", "lightgreen"), ycut = ythresholds, xcut = xthresholds)
+
+
+```
+
+**Figure 3.** Quality statistics for not selected and selected samples.
+
+Here we can see the distribution of quality statistics among our selected samples.
+
+```{r Selected_QStats_Box, echo=FALSE, message=FALSE}
+
+selection<-which(col!="black")
+color_selection<-col
+#par(mfrow=c(1, 1))
+#par(mfrow=c(2, 2))
+
+#pdf(file = "./figures_pdf2/FigS1A.pdf", width=5, height = 5)
+boxplot(as.numeric(stats[8, selection]), main=rownames(stats)[8], ylim=c(40, 100), xlab="")
+#dev.off()
+
+#pdf(file = "./figures_pdf2/FigS1C.pdf", width=5, height = 5)
+boxplot(as.numeric(log10(stats[11, selection]+1)), main=paste("log10", rownames(stats)[11], sep=""), ylim=c(2,5), xlab="")
+#dev.off()
+
+#pdf(file = "./figures_pdf2/FigS1B.pdf", width=5, height = 5)
+boxplot(as.numeric(stats[12, selection]), main=rownames(stats)[12], ylim=c(0, 20), xlab="")
+#dev.off()
+
+#pdf(file = "./figures_pdf2/FigS1D.pdf", width=5, height = 5)
+boxplot(as.numeric(log10(stats[7, selection]+1)), main="Total no. of reads (log10)", ylim=c(4.5, 8), xlab="")
+#dev.off()
+
+#position<-1:37
+```
+
+**Figure 4.** Stats of good samples
+
+Then we plotted the number of Posterior and Anterior samples that we selected. Most of the samples we selected are from the posterior area.
+
+
+```{r No.Samples, echo=FALSE, message=FALSE}
+write.csv(stats, "./supp_tables/allAxes_QCstats_G99.csv")
+```
+
+
+
+Data from https://www.sciencedirect.com/science/article/pii/S1934590917301273?via%3Dihub#fig2
+
+```{r readData, message=FALSE, warning=FALSE}
+
+DEGsDVdata<-read.csv("./supp_tables/newDVDEGs.autocor.binMatFDR0.01filt_G99.csv", stringsAsFactors = FALSE, header=TRUE)
+DEGsDV<-DEGsDVdata$Gene.name
+DEGsLMLdata<-read.csv("./supp_tables/newLMLDEGs.autocor.binMatFDR0.01filt_G99.csv", stringsAsFactors = FALSE, header=TRUE)
+DEGsLML<-DEGsLMLdata$Gene.name
+DEGsAPdata<-read.csv("./supp_tables/newAPDEGs.autocor.binMatFDR0.01filt_G99.csv", stringsAsFactors = FALSE, header=TRUE)
+DEGsAP<-DEGsAPdata$Gene.name
+```
+
+
+```{r readSCData, message=FALSE, warning=FALSE}
+
+
+scTPMs<-read.csv("../GSE95601_oeHBCdiff_RSEM_eSet_tpm_table.txt", stringsAsFactors = F, sep="\t")
+scTPMs<-scTPMs[-grep("ERCC", rownames(scTPMs)),]
+
+names.clusters<-read.csv("../cellType_clusterLabels.txt", stringsAsFactors = F, header=F, sep="\t")
+
+scTPMs<-scTPMs[,intersect(names(scTPMs), names.clusters$V1)]
+
+cellTypes<-read.csv("../cellType_clusterKey.txt", stringsAsFactors = F, header=F, sep="\t")
+
+#cellTypeMarkers<-read.csv("./cellType_markers.txt", stringsAsFactors = F, header=F)
+#cellTypeMarkers<-as.character(cellTypeMarkers[,1])
+
+cellTypeMarkers<-c("Trp63", "Krt5", "Krt14","Neurod1", "Lhx2", "Gap43", "Gng8", "Kit", "Ascl1", "Cyp2g1", "Trpm5", "Sox9","Omp", "Cnga2", "Gnal", "Gng13", "Ascl3", "Cftr")
+
+#cellTypeDEMarkers<-c("Sox9", "Ebf3", "Perp", "Ebf1", "Neurod1", "Cbr2", "Nhlh2", "Ect2", "Lhx2", "Tubb5", "Tgfbr2", "Cd24a", "Car2", "Reg3g", "Omp", "Cnga2", "Gng13", "Gap43", "Gnal")
+
+scTPMsAll<-scTPMs
+scTPMs<-scTPMs[cellTypeMarkers,]
+
+##### Order by cell type
+names.clusters<-names.clusters[order(names.clusters$V2),]
+scTPMs<-scTPMs[,names.clusters$V1]
+scTPMsAll<-scTPMsAll[,names.clusters$V1]
+
+scTPMs[is.na(scTPMs)]<-0
+scTPMsAll[is.na(scTPMsAll)]<-0
+
+#length(which(colnames(scTPMs)!=names.clusters$V1))
+```
+
+```{r viewing, message=FALSE, warning=FALSE}
+
+#Dataset has some NA values which were eqauled to 0
+
+#### Get sample number
+
+sampleNo<-numeric()
+for(x in unique(names.clusters$V2)){
+  temp<-1:length(which(names.clusters$V2 == x))
+  sampleNo<-c(sampleNo, temp)
+}
+cellTypeSampleNames<-paste(names.clusters$V2, "-", sampleNo, sep="")
+
+heat_scTPMs<-log10(scTPMs+1)
+colnames(heat_scTPMs)<-cellTypeSampleNames
+cellType<-gsub("-.+", "", colnames(heat_scTPMs))
+
+cellsTable<-table(cellType)
+cellsTable<-cellsTable[order(as.numeric(names(cellsTable)))]
+names(cellsTable)<-c("1-HBC", "2-INP1", "3-GBC", "4-mSC", "5-tHBC2", "7-iSC", "8-tHBC1", "9-iOSN", "10-INP3", "11-MVC1", "12-mOSN", "14-INP2", "15-MVC2")
+write.csv(cellsTable, "./supp_tables/scRNAseq_CellsPercellType.csv")
+
+#### Cell type assignment
+colnames(scTPMsAll)<-cellTypeSampleNames
+
+scTPMsMeans<-t(apply(heat_scTPMs, 1, function(i){tapply(i, cellType, mean)}))
+scTPMsMeans<-scTPMsMeans[,order(as.numeric(colnames(scTPMsMeans)))]
+colnames(scTPMsMeans)<-c("1-HBC", "2-INP1", "3-GBC", "4-mSC", "5-tHBC2", "7-iSC", "8-tHBC1", "9-iOSN", "10-INP3", "11-MVC1", "12-mOSN", "14-INP2", "15-MVC2")
+
+scTPMsMeansV1<-scTPMsMeans[,c("1-HBC", "8-tHBC1", "5-tHBC2", "2-INP1", "14-INP2", "10-INP3", "9-iOSN", "12-mOSN", "3-GBC", "7-iSC", "4-mSC", "11-MVC1", "15-MVC2")]
+
+heatmap.2(as.matrix(scTPMsMeans), Colv = NA, Rowv = NA, xlab="cell Type", trace='none', key.title="log10 mean gene expression", key.ylab=NA, key.xlab=NA, col=viridis(100), cexRow = 0.5, cexCol = 0.8, keysize = 1)
+
+heatmap.2(as.matrix(scTPMsMeansV1), Colv = NA, Rowv = NA, xlab="cell Type", trace='none', key.title="log10 mean gene expression", key.ylab=NA, key.xlab=NA, col=viridis(100), cexRow = 0.5, cexCol = 0.8, keysize = 1)
+
+cellTypes
+
+#d<-data.frame(names.clusters, cellTypeSampleNames, colnames(scTPMsAll))
+```
+
+
+
+**Figure** Cell type markers
+
+```{r, genes_sel, message=FALSE, warning=FALSE}
+scTPMsAllMeans<-t(apply(scTPMsAll, 1, function(i){tapply(i, cellType, mean)}))
+scTPMsAllMeans<-scTPMsAllMeans[,order(as.numeric(colnames(scTPMsAllMeans)))]
+colnames(scTPMsAllMeans)<-c("1-HBC", "2-INP1", "3-GBC", "4-mSC", "5-tHBC2", "7-iSC", "8-tHBC1", "9-iOSN", "10-INP3", "11-MVC1", "12-mOSN", "14-INP2", "15-MVC2")
+
+maxMeanExpOthers<-apply(scTPMsAllMeans[,-(which(colnames(scTPMsAllMeans)=="12-mOSN"))], 1, max)
+#maxExpOthers10p<-sort(maxExpOthers)[(length(maxExpOthers)-round(length(maxExpOthers)/100)+1):length(maxExpOthers)]
+
+otherCellGenes<-rownames(scTPMsAllMeans)[which(scTPMsAllMeans[,"12-mOSN"]<10&maxMeanExpOthers>100)]
+
+OSNgenes<-rownames(scTPMsAllMeans)[which(scTPMsAllMeans[,"12-mOSN"]>100&maxMeanExpOthers<10)]
+#otherCellGenes<-rownames(scTPMsAll)[which(maxExpOSN<10)]
+#otherCellGenes<-intersect(otherCellGenes, names(maxExpOthers10p))
+allCellsGenes<-rownames(scTPMsAllMeans)[which(scTPMsAllMeans[,"12-mOSN"]>100&maxMeanExpOthers>100)]
+length(allCellsGenes)
+
+interVenn<-venn.diagram(list(DEGsDV=DEGsDV, otherCells=otherCellGenes), fill = c("red", "blue"), alpha = c(0.5, 0.5), cex = 1, cat.cex = 1, sub.cex = 0.8, filename = NULL, scaled=T)
+
+grid.draw(interVenn)
+
+DEGsDVinterOtherCells<-intersect(DEGsDV, otherCellGenes)
+
+#DEGsDVinterOtherCells
+
+```
+
+**Figure** DV DEGs from other cells
+
+
+```{r, genes_sel2, message=FALSE, warning=FALSE}
+
+interVenn<-venn.diagram(list(DEGsLML=DEGsLML, otherCells=otherCellGenes), fill = c("red", "blue"), alpha = c(0.5, 0.5), cex = 1, cat.cex = 1, sub.cex = 0.8, filename = NULL, scaled=T)
+
+grid.draw(interVenn)
+
+DEGsLMLinterOtherCells<-intersect(DEGsLML, otherCellGenes)
+
+#DEGsLMLinterOtherCells
+
+```
+
+**Figure** LML DEGs from other cells
+
+```{r, genes_sel3, message=FALSE, warning=FALSE}
+
+interVenn<-venn.diagram(list(DEGsAP=DEGsAP, otherCells=otherCellGenes), fill = c("red", "blue"), alpha = c(0.5, 0.5), cex = 1, cat.cex = 1, sub.cex = 0.8, filename = NULL, scaled=T)
+
+grid.draw(interVenn)
+
+DEGsAPinterOtherCells<-intersect(DEGsAP, otherCellGenes)
+
+#DEGsAPinterOtherCells
+
+```
+
+**Figure** AP DEGs from other cells
+
+```{r, genes_allDEGsX, message=FALSE, warning=FALSE}
+
+interVenn<-venn.diagram(list(DEGs=unique(c(DEGsAP, DEGsDV, DEGsLML)), otherCells=otherCellGenes), fill = c("red", "blue"), alpha = c(0.5, 0.5), cex = 1, cat.cex = 1, sub.cex = 0.8, filename = NULL, scaled=T)
+grid.draw(interVenn)
+
+#mat<-rbind(intersection=rep(length(intersect(unique(c(DEGsAP, DEGsDV, DEGsLML)), otherCellGenes)), 2), total=c(length(unique(c(DEGsAP, DEGsDV, DEGsLML))), length(otherCellGenes)))
+#colnames(mat)=c("DEGs", "otherCellGenes")
+
+mat<-as.matrix(c(OSNsDEGs=length(intersect(unique(c(DEGsAP, DEGsDV, DEGsLML)), OSNgenes)), nonOSNsDEGs=length(intersect(unique(c(DEGsAP, DEGsDV, DEGsLML)), otherCellGenes)), totalDEGs=length(unique(c(DEGsAP, DEGsDV, DEGsLML)))))
+
+pdf(file = "./figures_pdf2/Fig3A.1.pdf", width=3.5, height = 5)
+#barplot(mat, legend=rownames(mat))
+barplot(log10(mat), legend=rownames(mat), ylab="log10 no. of genes", width = c(0.1, 0.1, 0.1), xlim=c(0,1))
+barplot(log10(mat)[,1], las=2, ylab="log10 no. of genes", cex.axis = 0.6, cex.names = 0.6)
+dev.off()
+
+write.csv(mat, "./supp_tables/mOSNandNonmOSN_DEGs.csv")
+```
+
+**Figure** All DEGs from other cells
+
+```{r, genes_sel4, message=FALSE, warning=FALSE}
+
+interVenn<-venn.diagram(list(DEGsAPothers=DEGsAPinterOtherCells, DEGsLMLothers=DEGsLMLinterOtherCells, DEGsDVothers=DEGsDVinterOtherCells), fill = c("green", "red", "blue"), alpha = c(0.5, 0.5, 0.5), cex = 1, cat.cex = 1, sub.cex = 0.8, filename = NULL, scaled=T)
+
+grid.draw(interVenn)
+
+DEGsOtherCells3axes<-intersect(DEGsAPinterOtherCells, DEGsLMLinterOtherCells)
+DEGsOtherCells3axes<-intersect(DEGsOtherCells3axes, DEGsDVinterOtherCells)
+DEGsOtherCells3axes
+
+#FDR
+DEGsDViocFDRs<-DEGsDVdata$FDR[match(DEGsDVinterOtherCells, DEGsDVdata$Gene.name)]
+DEGsLMLiocFDRs<-DEGsLMLdata$FDR[match(DEGsLMLinterOtherCells, DEGsLMLdata$Gene.name)]
+DEGsAPiocFDRs<-DEGsAPdata$FDR[match(DEGsAPinterOtherCells, DEGsAPdata$Gene.name)]
+
+#Mean expression in OSNs
+DEGsDViocOSNmean<-scTPMsAllMeans[DEGsDVinterOtherCells, "12-mOSN"]
+DEGsLMLiocOSNmean<-scTPMsAllMeans[DEGsLMLinterOtherCells, "12-mOSN"]
+DEGsAPiocOSNmean<-scTPMsAllMeans[DEGsAPinterOtherCells, "12-mOSN"]
+
+#Highest mean expression in Other cell type
+DEGsDViocMaxMean<-maxMeanExpOthers[DEGsDVinterOtherCells]
+DEGsLMLiocMaxMean<-maxMeanExpOthers[DEGsLMLinterOtherCells]
+DEGsAPiocMaxMean<-maxMeanExpOthers[DEGsAPinterOtherCells]
+
+#That cell type
+DEGsDViocMaxMeanCell<-sapply(names(DEGsDViocMaxMean), function(x){colnames(scTPMsAllMeans)[which(scTPMsAllMeans[x,]==DEGsDViocMaxMean[x])]})
+DEGsLMLiocMaxMeanCell<-sapply(names(DEGsLMLiocMaxMean), function(x){colnames(scTPMsAllMeans)[which(scTPMsAllMeans[x,]==DEGsLMLiocMaxMean[x])]})
+DEGsAPiocMaxMeanCell<-sapply(names(DEGsAPiocMaxMean), function(x){colnames(scTPMsAllMeans)[which(scTPMsAllMeans[x,]==DEGsAPiocMaxMean[x])]})
+
+#Dataframes
+DEGsDVinterOtherCellsDF<-data.frame(DEGsDVinterOtherCells, DEGsDViocFDRs, DEGsDViocOSNmean, DEGsDViocMaxMean, DEGsDViocMaxMeanCell)
+colnames(DEGsDVinterOtherCellsDF)<-c("gene.name", "FDR", "OSNsMeanExpression", "maxMeanExpression", "maxMeanExpressionCellType")
+DEGsLMLinterOtherCellsDF<-data.frame(DEGsLMLinterOtherCells, DEGsLMLiocFDRs, DEGsLMLiocOSNmean, DEGsLMLiocMaxMean, DEGsLMLiocMaxMeanCell)
+colnames(DEGsLMLinterOtherCellsDF)<-c("gene.name", "FDR", "OSNsMeanExpression", "maxMeanExpression", "maxMeanExpressionCellType")
+DEGsAPinterOtherCellsDF<-data.frame(DEGsAPinterOtherCells, DEGsAPiocFDRs, DEGsAPiocOSNmean, DEGsAPiocMaxMean, DEGsAPiocMaxMeanCell)
+colnames(DEGsAPinterOtherCellsDF)<-c("gene.name", "FDR", "OSNsMeanExpression", "maxMeanExpression", "maxMeanExpressionCellType")
+
+#write.csv(DEGsDVinterOtherCellsDF, "./DEGsDVfromOtherCellsData.csv")
+
+#write.csv(DEGsLMLinterOtherCellsDF, "./DEGsLMLfromOtherCellsData.csv")
+
+#write.csv(DEGsAPinterOtherCellsDF, "./DEGsAPfromOtherCellsData.csv")
+
+write.table(DEGsDVinterOtherCells, "./supp_tables/DEGsNewDVG99interOtherCells.csv", row.names=F, col.names = F)
+write.table(DEGsAPinterOtherCells, "./supp_tables/DEGsNewAPG99interOtherCells.csv", row.names=F, col.names = F)
+write.table(DEGsLMLinterOtherCells, "./supp_tables/DEGsNewLMLG99interOtherCells.csv", row.names=F, col.names = F)
+```
+
+**Figure** DAxes intersection of DEGs from other cells
+
+```{r, OtherCellsGenesheatDV, message=FALSE, warning=FALSE}
+par(mfrow=c(2, 2))
+
+#Other Cells Genes
+
+heat_genesOtherCells<-log10(scTPMsAllMeans[otherCellGenes,]+1)
+write.csv(heat_genesOtherCells, "./supp_tables/otherCellsGenes.csv")
+#heatOtherCellsMeans<-t(apply(heat_genesOtherCells, 1, function(i){tapply(i, cellType, mean)}))
+#heatOtherCellsMeans.1<-t(apply(heatOtherCellsMeans, 1, function(x){(x-min(x))/(max(x)-min(x))}))
+
+#heatmap.2(as.matrix(heat_genesOtherCells), Colv = NA, xlab="cell Type", trace='none', key.title="log10 mean gene expression", key.ylab=NA, key.xlab=NA, col=viridis(100), cexRow = 0.5, cexCol = 0.8, keysize = 1)
+
+#Other Cells Genes DE in DV
+
+heatmap.2(as.matrix(heat_genesOtherCells[DEGsDVinterOtherCells,]), Colv = NA, xlab="cell Type", trace='none', key.title="log10 mean gene expression", key.ylab=NA, key.xlab=NA, col=viridis(100), cexRow = 0.5, cexCol = 0.8, keysize = 1)
+
+```
+
+**Figure** DV Other cell type genes' mean expression per cell type (normalized)
+
+```{r, OtherCellsGenesheatLML, message=FALSE, warning=FALSE}
+
+#Other Cells Genes DE in LML
+
+heatmap.2(as.matrix(heat_genesOtherCells[DEGsLMLinterOtherCells,]), Colv = NA, xlab="cell Type", trace='none', key.title="log10 mean gene expression", key.ylab=NA, key.xlab=NA, col=viridis(100), cexRow = 0.5, cexCol = 0.8, keysize = 1)
+
+```
+
+**Figure** LML Other cell type genes' mean expression per cell type (normalized)
+
+```{r, OtherCellsGenesheatAP, message=FALSE, warning=FALSE}
+
+#Other Cells Genes DE in AP
+
+heatmap.2(as.matrix(heat_genesOtherCells[DEGsAPinterOtherCells,]), Colv = NA, xlab="cell Type", trace='none', key.title="log10 mean gene expression", key.ylab=NA, key.xlab=NA, col=viridis(100), cexRow = 0.5, cexCol = 0.8, keysize = 1)
+
+#barplot(heat_genesOtherCells["Moxd2",])
+
+tmpDV<-heat_genesOtherCells[DEGsDVinterOtherCells,]
+tmpLML<-heat_genesOtherCells[DEGsLMLinterOtherCells,]
+tmpAP<-heat_genesOtherCells[DEGsAPinterOtherCells,]
+
+for(cell in colnames(tmpDV)[-11]){
+  cellDEGs<-unique(c(rownames(tmpDV)[which(tmpDV[,cell]>2)], rownames(tmpLML)[which(tmpLML[,cell]>2)], rownames(tmpAP)[which(tmpAP[,cell]>2)]))
+  write.table(cellDEGs, paste("./supp_tables/otherCellsDEGsLists/DEGs", cell, sep=""), row.names=F, col.names = F, quote = F)
+}
+```
+
+**Figure** AP Other cell type genes' mean expression per cell type (normalized)
+
+```{r, singleHeatmap, message=FALSE, warning=FALSE}
+x<-unique(c(DEGsDVinterOtherCells, DEGsLMLinterOtherCells, DEGsAPinterOtherCells))
+x<-x[-grep("Olfr", x)]
+
+pdf(file = "./figures_pdf2/Fig3A.2.pdf", width=7, height = 5)
+heatmap.2(as.matrix(heat_genesOtherCells[x,]), xlab="cell Type", ylab="gene", trace='none', key.title="log10 mean exp", key.ylab=NA, key.xlab=NA, col=viridis(100), cexRow = 0.5, cexCol = 0.8, keysize = 1)
+dev.off()
+
+dim(heat_genesOtherCells[x,])
+```
+
+**Figure.** DEGs from other cells heatmap
+
+```{r, cellTypeSpecificity, message=FALSE, warning=FALSE}
+otherCellGenesHM<-heat_genesOtherCells[x,]
+
+consecutiveValsWilcox<-function(val1, val2, dataMeans, data){
+  res<-numeric()
+  for(i in rownames(dataMeans)){
+    tmp<-rev(sort(dataMeans[i,]))
+    p<-wilcox.test(as.numeric(data[i, grep(gsub("-..+", "-", names(tmp)[val1]), colnames(data))]), as.numeric(data[i, grep(gsub("-..+", "-", names(tmp)[val2]), colnames(data))]))$p.value
+    res<-rbind(res, c(i, names(tmp)[val1], p))
+  }
+  colnames(res)<-c("gene", "cellType", "Pvalue")
+  fdr<-p.adjust(res[,3], method="fdr")
+  res<-cbind(res, fdr)
+  return(res)
+}
+
+specificity<-consecutiveValsWilcox(val1=1, val2=2, dataMeans = otherCellGenesHM, data=scTPMsAll)
+specificity<-specificity[order(as.numeric(specificity[,4])),]
+
+geneList<-sapply(unique(specificity[,2]), function(x){specificity[which(specificity[,2]==x)[1],1]})
+geneList2<-sapply(unique(specificity[,2]), function(x){specificity[which(specificity[,2]==x)[2],1]}) #2 most specific genes per cell type
+
+geneList<-c(geneList, geneList2)
+geneList<-geneList[-which(is.na(geneList))]
+
+names(geneList)<-gsub(".gene", "", names(geneList))
+geneList<-c(geneList, "Ace2", "Acsm4")
+names(geneList)[length(geneList)]<-"iSC"
+write.csv(geneList, "./supp_tables/mostSpecificGenePerCellType.csv")
+
+#par(las=2, mfrow=c(2, 2))
+#for(gene in geneList){
+#  barplot(heat_genesOtherCells[gene,], ylab="log10 mean rpm exp.", main=paste(gene, names(geneList)[which(geneList==gene)]), ylim=c(0, 5))
+#}
+
+cellTypes<-sapply(cellType, function(x){names(cellsTable)[which(gsub("-..+", "", names(cellsTable))==x)]})
+
+#par(las=2, mfrow=c(2, 2))
+for(gene in geneList){
+  data<-data.frame(cellType=cellTypes, value=log10(as.numeric(scTPMsAll[gene,])+1))
+  data$cellType <- factor(data$cellType, levels = c("1-HBC", "2-INP1", "3-GBC", "4-mSC", "5-tHBC2", "7-iSC", "8-tHBC1", "9-iOSN", "10-INP3", "11-MVC1", "12-mOSN", "14-INP2", "15-MVC2"))
+  #ggplot(data, aes(x=cellType, y=value, fill=cellType)) + geom_violin() + theme(axis.text.x = element_text(angle = 90)) + geom_jitter(shape=16, position=position_jitter(0.2))
+  ggplot(data, aes(x=cellType, y=value, fill=cellType)) + theme(axis.text.x = element_text(angle = 90)) + geom_boxplot()
+  ggsave(paste("./figures_pdf2/Fig3B.1", gene, ".pdf", sep=""), width = 5, height = 5)
+}
+
+for(gene in c("Moxd2", "Sbpl", "Cck", "Btnl10", "F930017D23Rik", "Igll1", "Olfm5", "B4galnt2", "Smim31", "Cxcl13", "Pcdhga4", "Sphkap", "Gm14197", "Sva", "Cabs1")){
+  data<-data.frame(cellType=cellTypes, value=log10(as.numeric(scTPMsAll[gene,])+1))
+  data$cellType <- factor(data$cellType, levels = c("1-HBC", "2-INP1", "3-GBC", "4-mSC", "5-tHBC2", "7-iSC", "8-tHBC1", "9-iOSN", "10-INP3", "11-MVC1", "12-mOSN", "14-INP2", "15-MVC2"))
+  #ggplot(data, aes(x=cellType, y=value, fill=cellType)) + geom_violin() + theme(axis.text.x = element_text(angle = 90)) + geom_jitter(shape=16, position=position_jitter(0.2))
+  ggplot(data, aes(x=cellType, y=value, fill=cellType)) + theme(axis.text.x = element_text(angle = 90)) + geom_boxplot()
+  ggsave(paste("./figures_pdf2/TopicMarker_", gene, ".pdf", sep=""), width = 5, height = 5)
+}
+
+
+```
+
+
+```{r, fht, message=FALSE, warning=FALSE}
+#heat2sc<-log10(scTPMsAllMeans[otherCellGenes,]+1)
+
+#par(las=2, mfrow=c(2, 2))
+#barplot(log10(scTPMsAllMeans["Moxd2",]+1), ylab="log10 mean expression", main="Moxd2")
+#barplot(heat_genesOtherCells["S100A15A",], ylab="log10 mean expression", main="S100A15A")
+
+APclusters<-read.csv("./supp_tables/newAPDEGs.autocor.binMatFDR0.01filt_G99.csv")
+posteriorCluster<-APclusters$Gene.name[which(APclusters$clustersMinCS50=="turquoise")]
+
+#APextraDEGs<-read.csv("./3D/APextraDEGs.csv")
+#APextraDEGs<-APextraDEGs$x
+
+#extraDEGs
+data<-data.frame(cellType=cellTypes, t(log10(scTPMsAll[posteriorCluster,]+1)))
+data<-t(apply(data[,-1], 2, function(x){tapply(x, data[,1], mean)}))
+data<-t(apply(data, 1, normBetween0and1))
+data<-data[-which(is.na(rowSums(data))),]
+
+nonPosteriorClusters<-DEGsAP[-which(DEGsAP %in% posteriorCluster)]
+#rest of AP DEGs
+data2<-data.frame(cellType=cellTypes, t(log10(scTPMsAll[nonPosteriorClusters,]+1)))
+data2<-t(apply(data2[,-1], 2, function(x){tapply(x, data2[,1], mean)}))
+data2<-t(apply(data2, 1, normBetween0and1))
+data2<-data2[-which(is.na(rowSums(data2))),]
+
+#data2<-data.frame(cellType=cellTypes, t(log10(scTPMsAll[-which(rownames(scTPMsAll) %in% APextraDEGs),]+1)))
+#data2<-t(apply(data2[,-1], 2, function(x){tapply(x, data2[,1], mean)}))
+#data2<-t(apply(data2, 1, normBetween0and1))
+#data2<-data2[-which(is.na(rowSums(data2))),]
+
+pdf(file = "./figures_pdf2/FigS2E.pdf", width=7, height = 5)
+
+heatmap.2(as.matrix(data), xlab="", trace='none', key.title=NA, key.ylab=NA, col=viridis(length(seq(0,1,0.1))-1), cexRow = 0.8, key.xlab = "normmeanlog10geneExp", breaks=seq(0,1,0.1))
+
+wilcox.test(colMeans(data[,which(colnames(data) %in% c("2-INP1", "3-GBC", "10-INP3", "14-INP2", "9-iOSN", "12-mOSN"))]), colMeans(data[,-which(colnames(data) %in% c("2-INP1", "3-GBC", "10-INP3", "14-INP2", "9-iOSN", "12-mOSN"))]))
+
+boxplot(data[,order(-colMedians(data))], ylab="NormMeanLog10Exp", las=2)
+
+heatmap.2(as.matrix(data2), xlab="", trace='none', key.title=NA, key.ylab=NA, col=viridis(length(seq(0,1,0.1))-1), cexRow = 0.8, key.xlab = "normmeanlog10geneExp", breaks=seq(0,1,0.1))
+
+wilcox.test(colMeans(data2[,which(colnames(data2) %in% c("2-INP1", "3-GBC", "10-INP3", "14-INP2", "9-iOSN", "12-mOSN"))]), colMeans(data2[,-which(colnames(data2) %in% c("2-INP1", "3-GBC", "10-INP3", "14-INP2", "9-iOSN", "12-mOSN"))]))
+
+boxplot(data2[,order(-colMedians(data2))], ylab="NormMeanLog10Exp", las=2)
+
+dev.off()
+
+wilcox.test(colMeans(data[,which(colnames(data) %in% c("2-INP1", "3-GBC", "10-INP3", "14-INP2", "9-iOSN", "12-mOSN"))]), colMeans(data[,-which(colnames(data) %in% c("2-INP1", "3-GBC", "10-INP3", "14-INP2", "9-iOSN", "12-mOSN"))]))
+
+wilcox.test(colMeans(data2[,which(colnames(data2) %in% c("2-INP1", "3-GBC", "10-INP3", "14-INP2", "9-iOSN", "12-mOSN"))]), colMeans(data2[,-which(colnames(data2) %in% c("2-INP1", "3-GBC", "10-INP3", "14-INP2", "9-iOSN", "12-mOSN"))]))
+
+
+#par(las=2, mfrow=c(2, 2))
+#for(gene in APextraDEGs[1:20]){
+#  data<-data.frame(cellType=cellTypes, value=log10(as.numeric(scTPMsAll[gene,])+1))
+#  data$cellType <- factor(data$cellType, levels = c("1-HBC", "2-INP1", "3-GBC", "4-mSC", "5-tHBC2", "7-iSC", "8-tHBC1", "9-iOSN", "10-INP3", "11-MVC1", "12-mOSN", "14-INP2", "15-MVC2"))
+#  ggplot(data, aes(x=reorder(cellType, -value), y=value, fill=cellType)) + theme(axis.text.x = element_text(angle = 90)) + geom_boxplot() + ggtitle(gene)
+#  ggsave(paste("./figures_pdf2/Fig2E", gene, ".pdf", sep=""), width = 5, height = 5)
+#}
+
+#data<-data.frame(cellType=cellTypes, value=colMeans(log10(scTPMsAll[APextraDEGs,]+1), na.rm = T))
+#data$cellType <- factor(data$cellType, levels = c("1-HBC", "2-INP1", "3-GBC", "4-mSC", "5-tHBC2", "7-iSC", "8-tHBC1", "9-iOSN", "10-INP3", "11-MVC1", "12-mOSN", "14-INP2", "15-MVC2"))
+#ggplot(data, aes(x=reorder(cellType, -value), y=value, fill=cellType)) + theme(axis.text.x = element_text(angle = 90)) + geom_boxplot() + ggtitle("AP exclusive DEGs")
+#ggsave("./figures_pdf2/Fig2E_APextraDEGs.pdf", width = 5, height = 5)
+```
+
+
+```{r, CheckAnnotation, message=FALSE, warning=FALSE}
+mOSNs<-scTPMsAll[,grep("12-", colnames(scTPMsAll))]
+colnames(mOSNs)<-gsub("12-", "mOSN-", colnames(mOSNs))
+mOSNsMarkers<-c("Omp", "Cnga2", "Gng13", "Gnal")
+heat_mOSNsMarkers<-log10(mOSNs[mOSNsMarkers,]+1)
+
+heatmap.2(as.matrix(heat_mOSNsMarkers), Colv = NA, xlab="cell Type - sample", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=viridis(100), cexRow = 0.5, cexCol = 0.8, keysize = 1)
+
+heat_mOSNsMarkers_all<-log10(scTPMsAllMeans[mOSNsMarkers,]+1)
+
+heatmap.2(as.matrix(heat_mOSNsMarkers_all), Colv = NA, xlab="cell Type", trace='none', key.title="log10 mean gene expression", key.ylab=NA, key.xlab=NA, col=viridis(100), cexRow = 0.5, cexCol = 0.8, keysize = 1)
+```
+
+**Figure** Check OSN markers expression
+
+```{r, CheckAnnotation1, message=FALSE, warning=FALSE}
+
+ORs<-rownames(scTPMsAll)[grep("Olfr", rownames(scTPMsAll))]
+heat_mOSNsORs<-log10(mOSNs[ORs,]+1)
+heatmap.2(as.matrix(heat_mOSNsORs), Colv = NA, xlab="cell Type - sample", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=viridis(100), cexRow = 0.5, cexCol = 0.8, keysize = 1)
+
+heat_ORs_all<-log10(scTPMsAllMeans[ORs,]+1)
+
+heatmap.2(as.matrix(heat_ORs_all), Colv = NA, xlab="cell Type", trace='none', key.title="log10 mean gene expression", key.ylab=NA, key.xlab=NA, col=viridis(100), cexRow = 0.5, cexCol = 0.8, keysize = 1)
+
+#heat_ORs<-log10(scTPMsAll[ORs,]+1)
+
+#heatmap.2(as.matrix(heat_ORs), Colv = NA, xlab="cell Type", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=viridis(100), cexRow = 0.5, cexCol = 0.8, keysize = 1)
+
+DV_GObg<-read.csv("./supp_tables/forGOanalysis/newDVgenes_GObg.csv", stringsAsFactors = FALSE, header=F)
+LM_GObg<-read.csv("./supp_tables/forGOanalysis/newLMgenes_GObg.csv", stringsAsFactors = FALSE, header=F)
+AP_GObg<-read.csv("./supp_tables/forGOanalysis/newAPgenes_GObg.csv", stringsAsFactors = FALSE, header=F)
+allAxes_GObg<-union(DV_GObg$V1, LM_GObg$V1)
+allAxes_GObg<-union(allAxes_GObg, AP_GObg$V1)
+write.table(allAxes_GObg, "./supp_tables/otherCellsDEGsLists/allAxes_GObg.csv", row.names=F, col.names = F)
+
+DEGsOtherCells<-unique(c(DEGsDVinterOtherCells, DEGsLMLinterOtherCells, DEGsAPinterOtherCells))
+write.table(DEGsOtherCells, "./supp_tables/otherCellsDEGsLists/DEGsOtherCells.csv", row.names=F, col.names = F)
+
+#heat_ORs_x<-log10(scTPMsAll[ORs,grep("1-", colnames(scTPMsAll))]+1)
+
+#heatmap.2(as.matrix(heat_ORs_x), Colv = NA, xlab="cell Type", trace='none', key.title="log10 gene expression", key.ylab=NA, key.xlab=NA, col=viridis(100), cexRow = 0.5, cexCol = 0.8, keysize = 1)
+```
+
+**Figure** Check ORs markers expression
+
+```{r, CheckAnnotation2, message=FALSE, warning=FALSE}
+exp_ORs<-scTPMsAll[ORs,]
+
+ORexpressingCellsfrac<-sapply(unique(cellType), function(x){length(which(colSums(exp_ORs[,which(cellType==x)])!=0))/length(which(cellType==x))})
+
+meanORexpression<-sapply(unique(cellType), function(x){mean(exp_ORs[,which(cellType==x)][exp_ORs[,which(cellType==x)]>0])})
+
+data.frame(ORexpressingCellsfrac, meanORexpression)
+```
+
+**Table** Fraction of cells expressing at least 1 OR (expression > 0) and mean OR expression in OR expressing cells per cell type (cell types = 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 14, 15)
+
+```{r ComparetoChemSDEORs, echo=FALSE, message=FALSE, warning=FALSE}
+ORsChems<-read.csv("../DEORsChemSens.csv", stringsAsFactors = FALSE, sep=";")
+DEORsChems<-ORsChems$gene.name[ORsChems$inferred.zone.index!="low expression"]
+
+DEORs<-unique(c(DEGsAP, DEGsDV, DEGsLML))
+DEORs<-DEORs[grep("Olfr", DEORs)]
+
+DVgenes<-rownames(read.csv("./supp_tables/newDV_AllGenes_normalized_rpm_repsAvg_mks.csv", stringsAsFactors = F, row.names = 1))
+LMLgenes<-rownames(read.csv("./supp_tables/newLML_AllGenes_normalized_rpm_repsAvg_mks.csv", stringsAsFactors = F, row.names = 1))
+APgenes<-rownames(read.csv("./supp_tables/newAP_AllGenes_normalized_rpm_repsAvg_mks.csv", stringsAsFactors = F, row.names = 1))
+testedGenes<-unique(c(DVgenes, LMLgenes, APgenes))
+testedORs<-testedGenes[grep("Olfr", testedGenes)]
+
+DEORsboxDEORsChems_venn<-venn.diagram(list(DEORs=DEORs, ChemS=DEORsChems), fill = c("red", "blue"), hyper.test = TRUE, total.population = length(union(testedORs, DEORsChems)), lower.tail = FALSE, alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, cat.pos = c(-10,10), sub.cex = 1.5, filename = NULL, scaled=T)
+
+pdf(file = "./figures_pdf2/FigS2B.1.pdf", width=10, height = 10)
+grid.draw(DEORsboxDEORsChems_venn)
+dev.off()
+
+
+ourNewDEORs=DEORs[-which(DEORs %in% intersect(DEORs, DEORsChems))]
+ourNewDEORs=as.data.frame(ourNewDEORs)
+write.csv(ourNewDEORs, "./supp_tables/DEORsNotInChemSenses.csv")
+```
+
+**Our DEORs vs Chem Senses**
+
+```{r ComparetoChemSDEGs0.18, echo=FALSE, message=FALSE, warning=FALSE}
+DEGsChems.18<-read.csv("../DEGsChemSensFDR0.18.csv", stringsAsFactors = FALSE, header=F, sep=";")
+colnames(DEGsChems.18)<-DEGsChems.18[2,]
+DEGsChems.18<-DEGsChems.18[-(1:2),]
+
+DEGsChems.51<-read.csv("../DEGsChemSensFDR0.51.csv", stringsAsFactors = FALSE, header=F, sep=";")
+colnames(DEGsChems.51)<-DEGsChems.51[2,]
+DEGsChems.51<-DEGsChems.51[-(1:2),]
+
+ourDEGs<-unique(c(DEGsAP, DEGsDV, DEGsLML))
+ourDEGs<-ourDEGs[-grep("Olfr", ourDEGs)]
+
+testedNonORs<-testedGenes[-grep("Olfr", testedGenes)]
+
+DEGsboxDEGsChems.18_venn<-venn.diagram(list(DEGS=ourDEGs, ChemS_0.18=DEGsChems.18$`gene name`), fill = c("red", "blue"), hyper.test = TRUE, total.population = length(union(testedNonORs, DEGsChems.18$`gene name`)), lower.tail = FALSE, alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, cat.pos = c(-10,10), sub.cex = 1.5, filename = NULL, scaled=T)
+
+pdf(file = "./figures_pdf2/FigS2B.2.pdf", width=10, height = 10)
+grid.draw(DEGsboxDEGsChems.18_venn)
+dev.off()
+
+```
+
+
+**Figure 30.** Venn Diagram showing the overlap between our differentially expressed genes and the ones found in https://academic.oup.com/chemse/article/43/6/427/5001524#118517741 with FDR<0.18
+
+```{r ComparetoChemSDEGs0.51, echo=FALSE, message=FALSE, warning=FALSE}
+
+DEGsboxDEGsChems.51_venn<-venn.diagram(list(DEGS=ourDEGs, ChemS_0.51=DEGsChems.51$`gene name`), fill = c("red", "blue"), hyper.test = TRUE, total.population = length(union(testedNonORs, DEGsChems.51$`gene name`)), lower.tail = FALSE, alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, cat.pos = c(-10,10), sub.cex = 1.5, filename = NULL, scaled=T)
+
+pdf(file = "./figures_pdf2/FigS2B.3.pdf", width=10, height = 10)
+grid.draw(DEGsboxDEGsChems.51_venn)
+dev.off()
+
+```
+
+**Figure 31.** Venn Diagram showing the overlap between our differentially expressed genes and the ones found in https://academic.oup.com/chemse/article/43/6/427/5001524#118517741 with FDR<0.51
+
+```{r GOplots}
+pdf(file = "./figures_pdf2/FigS3A.pdf", width=7, height = 5)
+
+par(las=2, mar=c(6,21,4,3))
+
+for(file in paste("./supp_tables/otherCellsDEGsLists/gorillaGO/", list.files(path="./supp_tables/otherCellsDEGsLists/gorillaGO/", pattern = "GO_.+xls"), sep="")){
+  GSEA<-read.csv(file, stringsAsFactors = F, sep="\t")
+  GSEA<-GSEA[grep("GO:", GSEA$GO.Term),1:5]
+  GSEA<-GSEA[which(GSEA$FDR.q.value<0.05),]
+  GSEA<-GSEA[order(-GSEA$Enrichment),]
+  plotTitle<-gsub("./supp_tables/otherCellsDEGsLists/gorillaGO/GO_", "", file)
+  plotTitle<-gsub("\\.xls", "", plotTitle)
+  if(length(GSEA$GO.Term)>0){
+    barplot(GSEA$Enrichment[rev(1:20)], horiz=TRUE, names.arg=GSEA$Description[rev(1:20)], cex.names=0.6, main=plotTitle, xlab="Enrichment", las=1)
+  }
+}
+
+dev.off()
+
+write.csv(scTPMsAll, "./supp_tables/scTPMs.csv")
+write.csv(scTPMsAllMeans, "./supp_tables/scTPMsMeanPerCellType.csv")
+```
+
+**Figure** 20 Most Enriched GO categories in the clusters with Min CS = 50

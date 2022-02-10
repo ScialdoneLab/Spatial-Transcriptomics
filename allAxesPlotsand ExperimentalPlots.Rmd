@@ -1,0 +1,871 @@
+---
+title: "All Axes plots"
+author: "Mayra L. Ruiz Tejada Segura"
+date: "30/01/2019"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r readDatasets, echo=FALSE, message=FALSE, warning=FALSE}
+rpm<-function(x){x*1000000/sum(x)}
+
+#read data and normalize for values from 0 to 1
+
+DV<-read.csv("../supp_tables/newDV_AllGenes_normalized_rpm_repsAvg_mks.csv", stringsAsFactors = FALSE, header=TRUE, row.names = 1)
+
+LML<-read.csv("../supp_tables/newLML_AllGenes_normalized_rpm_repsAvg_mks.csv", stringsAsFactors = FALSE, header=TRUE, row.names = 1)
+
+PA<-read.csv("../supp_tables/newAP_AllGenes_normalized_rpm_repsAvg_mks.csv", stringsAsFactors = FALSE, header=TRUE, row.names = 1)
+
+ORsChems<-read.csv("../../DEORsChemSens.csv", stringsAsFactors = FALSE, sep=";")
+```
+
+```{r BulkVsTOMO, echo=FALSE, message=FALSE, warning=FALSE}
+bulk<-read.csv("../../bulk_ORs.csv", stringsAsFactors = F, header=F, sep=";") #from Luis's paper https://journals.plos.org/plosgenetics/article?id=10.1371/journal.pgen.1004593#s5
+bulk<-bulk[-which(duplicated(bulk$V2)),]
+#bulk.norm=bulk[-(1:2),14:19]
+bulk.norm=bulk[-(1:2),8:13]
+rownames(bulk.norm)<-bulk$V2[-c(1:2)]
+bulk.norm<-apply(bulk.norm, 1, function(x){as.numeric(x)})
+bulk.norm<-t(apply(bulk.norm, 1, rpm))
+#bulk.norm<-data.frame(bulk[-(1:2),2], bulk.norm)
+ORsDV<-DV[grep("Olfr", rownames(DV)),]
+ORsLML<-LML[grep("Olfr", rownames(LML)),]
+ORsPA<-PA[grep("Olfr", rownames(PA)),]
+
+#detected.ORs.bulk<-length(which(colSums(bulk.norm)>0))
+detected.ORs.bulk<-length(which(colSums(bulk.norm)>=1))-length(which(colSums(bulk.norm[,grep("ps", colnames(bulk.norm))])>=1)) #sum of rpm counts across samples >=1
+
+detected.ORs.Chems<-length(ORsChems$gene.name[ORsChems$inferred.zone.index!="low expression"])-length(ORsChems[grep("ps", ORsChems$gene.name),]$gene.name[ORsChems[grep("ps", ORsChems$gene.name),]$inferred.zone.index!="low expression"]) #average TPM < 1
+
+detected.ORs.TOMOseq<-length(unique(c(rownames(ORsDV), rownames(ORsLML), rownames(ORsPA))))-length(unique(c(rownames(ORsDV)[grep("ps", rownames(ORsDV))], rownames(ORsLML)[grep("ps", rownames(ORsLML))], rownames(ORsPA)[grep("ps", rownames(ORsPA))])))
+
+detected.ORs.DV<-length(rownames(ORsDV))-length(rownames(ORsDV)[grep("ps", rownames(ORsDV))])
+detected.ORs.LML<-length(rownames(ORsLML))-length(rownames(ORsLML)[grep("ps", rownames(ORsLML))])
+detected.ORs.PA<-length(rownames(ORsPA))-length(rownames(ORsPA)[grep("ps", rownames(ORsPA))])
+
+##Pseudo
+#detected.ORs.bulk<-length(which(colSums(bulk.norm)>0))
+detected.psORs.bulk<-length(which(colSums(bulk.norm[,grep("ps", colnames(bulk.norm))])>=1)) #sum of rpm counts across samples >=1
+
+detected.psORs.Chems<-length(ORsChems[grep("ps", ORsChems$gene.name),]$gene.name[ORsChems[grep("ps", ORsChems$gene.name),]$inferred.zone.index!="low expression"]) #average TPM < 1
+
+detected.psORs.TOMOseq<-length(unique(c(rownames(ORsDV)[grep("ps", rownames(ORsDV))], rownames(ORsLML)[grep("ps", rownames(ORsLML))], rownames(ORsPA)[grep("ps", rownames(ORsPA))])))
+
+detected.psORs.DV<-length(rownames(ORsDV)[grep("ps", rownames(ORsDV))])
+detected.psORs.LML<-length(rownames(ORsLML)[grep("ps", rownames(ORsLML))])
+detected.psORs.PA<-length(rownames(ORsPA)[grep("ps", rownames(ORsPA))])
+
+detected.ORs<-t(data.frame(ORs=c(detected.ORs.bulk, detected.ORs.Chems, detected.ORs.TOMOseq, detected.ORs.DV, detected.ORs.LML, detected.ORs.PA), psORs=c(detected.psORs.bulk, detected.psORs.Chems, detected.psORs.TOMOseq, detected.psORs.DV, detected.psORs.LML, detected.psORs.PA)))
+colnames(detected.ORs)<-c("Bulk","ChemS.", "TOMOseq", "Ts.DV", "Ts.LM", "Ts.AP")
+
+pdf(file = "../figures_pdf2/Fig1C.pdf", width=5, height = 5)
+barplot(detected.ORs, ylab="Number of Detected ORs", col=c("darkblue","red"),
+  legend = rownames(detected.ORs), beside=TRUE, las=2, args.legend = list(x = "right", bty="n", inset=c(-0.1,0), xpd = TRUE))
+dev.off()
+
+```
+
+**Barplot ORs from Bulk vs CHemS. vs.  TOMO**
+
+```{r detectedGenes, echo=FALSE, message=FALSE, warning=FALSE}
+detected.DV<-length(rownames(DV))
+detected.LML<-length(rownames(LML))
+detected.PA<-length(rownames(PA))
+detected.TOMOseq<-length(unique(c(rownames(DV), rownames(LML), rownames(PA))))
+
+detected.genes<-c(detected.TOMOseq, detected.DV, detected.LML, detected.PA)
+names(detected.genes)<-c("TOMO-seq", "Ts.DV", "Ts.LM", "Ts.AP")
+
+barplot(detected.genes, ylab="Number of Detected Genes", col=c("green", "red", "blue", "black"), las=1, ylim = c(0, max(detected.genes)+10))
+max(detected.genes)
+```
+
+**Barplot TOMO-seq detected genes**
+
+
+```{r DEGsIntersection, message=FALSE, warning=FALSE}
+library(mipfp)
+library(reshape2)
+library(rgl)
+library(gplots)
+library(viridis)
+library(gdata)
+
+## Get DEGs
+
+DEGsDVdata<-read.csv("../supp_tables/newDVDEGs.autocor.binMatFDR0.01filt_G99.csv", stringsAsFactors = FALSE, header=TRUE)
+DEGsDV<-DEGsDVdata$Gene.name
+DEGsLMLdata<-read.csv("../supp_tables/newLMLDEGs.autocor.binMatFDR0.01filt_G99.csv", stringsAsFactors = FALSE, header=TRUE)
+DEGsLML<-DEGsLMLdata$Gene.name
+DEGsPAdata<-read.csv("../supp_tables/newAPDEGs.autocor.binMatFDR0.01filt_G99.csv", stringsAsFactors = FALSE, header=TRUE)
+DEGsPA<-DEGsPAdata$Gene.name
+
+#plot intersection
+
+noGenes<-length(unique(c(rownames(DV), rownames(LML), rownames(PA))))
+
+library(VennDiagram)
+interVenn<-venn.diagram(list(DV=DEGsDV, LM=DEGsLML, AP=DEGsPA), fill = c("red", "blue", "green"), hyper.test = TRUE, total.population = noGenes, lower.tail = FALSE, alpha = c(0.5, 0.5, 0.5), cex = 2, cat.cex = 2, sub.cex = 1.5, filename = NULL, scaled=T)
+
+APextraDEGs<-setdiff(DEGsPA, union(DEGsDV, DEGsLML))
+write.csv(APextraDEGs, "./APextraDEGs.csv")
+
+DVextraDEGs<-setdiff(DEGsDV, union(DEGsPA, DEGsLML))
+write.csv(DVextraDEGs, "./DVextraDEGs.csv")
+
+LMLextraDEGs<-setdiff(DEGsLML, union(DEGsDV, DEGsPA))
+write.csv(LMLextraDEGs, "./LMLextraDEGs.csv")
+
+pdf(file = "../figures_pdf2/Fig2E.1.pdf", width=5, height = 5)
+grid.draw(interVenn)
+dev.off()
+```
+
+**Figure 1.** Intersection of Differentially Expressed Genes (DEGs) from the 3 axes (LML = Lateral-Medial-Lateral; DV = Dorsal-Ventral; PA = Posterior-Anterior) 
+
+```{r DEORsIntersection3, message=FALSE, warning=FALSE}
+
+DEORsDV<-DEGsDV[grep("Olfr", DEGsDV)]
+DEORsLML<-DEGsLML[grep("Olfr", DEGsLML)]
+DEORsPA<-DEGsPA[grep("Olfr", DEGsPA)]
+
+#plot intersection
+
+noGenes<-length(unique(c(rownames(DV)[grep("Olfr", rownames(DV))], rownames(LML)[grep("Olfr", rownames(LML))], rownames(PA)[grep("Olfr", rownames(PA))])))
+
+interVennORs<-venn.diagram(list(DV=DEORsDV, LM=DEORsLML, AP=DEORsPA), fill = c("red", "blue", "green"), hyper.test = TRUE, total.population = noGenes, lower.tail = FALSE, alpha = c(0.5, 0.5, 0.5), cex = 2, cat.cex = 2, sub.cex = 1.5, filename = NULL, scaled=T)
+
+pdf(file = "../figures_pdf2/Fig2E.2.pdf", width=5, height = 5)
+grid.draw(interVennORs)
+dev.off()
+```
+
+**Figure c.** Intersection of Differentially Expressed ORs (DEORs) from the 3 axes (LML = Lateral-Medial-Lateral; DV = Dorsal-Ventral; PA = Posterior-Anterior)
+
+```{r DEORsIntersection2, message=FALSE, warning=FALSE}
+
+DETaarsDV<-DEGsDV[grep("Taar", DEGsDV)]
+DETaarsLML<-DEGsLML[grep("Taar", DEGsLML)]
+DETaarsPA<-DEGsPA[grep("Taar", DEGsPA)]
+
+#plot intersection
+
+noGenes<-length(unique(c(rownames(DV)[grep("Taar", rownames(DV))], rownames(LML)[grep("Taar", rownames(LML))], rownames(PA)[grep("Taar", rownames(PA))])))
+
+interVennTaars<-venn.diagram(list(DV=DETaarsDV, LM=DETaarsLML, AP=DETaarsPA), fill = c("red", "blue", "green"), hyper.test = TRUE, total.population = noGenes, lower.tail = FALSE, alpha = c(0.5, 0.5, 0.5), cex = 2, cat.cex = 2, sub.cex = 1.5, filename = NULL, scaled=T)
+
+pdf(file = "../figures_pdf2/Fig2E.3.pdf", width=5, height = 5)
+grid.draw(interVennTaars)
+dev.off()
+```
+
+**Figure c.** Intersection of Differentially Expressed Taars (DETaars) from the 3 axes (LML = Lateral-Medial-Lateral; DV = Dorsal-Ventral; PA = Posterior-Anterior)
+
+```{r DEGsDEORsIntersection, message=FALSE, warning=FALSE}
+DEGs<-unique(c(DEGsDV, DEGsLML, DEGsPA))
+DEORs<-unique(c(DEORsDV, DEORsLML, DEORsPA))
+
+#plot intersection
+interVennDEGsDEORs<-venn.diagram(list(DEGs=DEGs, DEORs=DEORs), fill = c("red", "blue"), alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, sub.cex = 1.5, filename = NULL, scaled=T)
+
+grid.draw(interVennDEGsDEORs)
+```
+
+**Figure 2.** Venn Diagram showing the overlap between our differentially expressed genes and DE ORs
+
+```{r DEGscellTypeMarkersIntersect, message=FALSE, warning=FALSE}
+cellTypeMksTbl<-as.matrix(read.xls("./marker_list.xlsx", stringsAsFactors = F))
+
+nDEmks<-apply(cellTypeMksTbl, 2, function(x){length(which(x %in% DEGs))})
+nDEmks
+
+DEcellTypeMks<-matrix(nrow=dim(cellTypeMksTbl)[1], ncol=dim(cellTypeMksTbl)[2])
+
+DEcellTypeMks[which(cellTypeMksTbl %in% DEGs)]<-cellTypeMksTbl[which(cellTypeMksTbl %in% DEGs)]
+colnames(DEcellTypeMks)<-colnames(cellTypeMksTbl)
+
+write.csv(DEcellTypeMks, "../supp_tables/DEcellTypeMks.csv")
+#plot intersection
+#interVennDEGsCTMs<-venn.diagram(list(DEGs=DEGs, cellTypeMks=cellTypeMks), fill = c("red", "blue"), alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, sub.cex = 1.5, filename = NULL, scaled=T)
+
+#grid.draw(interVennDEGsDEORs)
+```
+
+```{r mks, echo=FALSE, message=FALSE, warning=FALSE}
+top20<-c("Acsm4", "Nqo1", "Ncam2")
+
+par(mfrow=c(3, 3))
+for(i in (1:3)){
+  plot(as.numeric(gsub("X", "", colnames(DV))), DV[which(rownames(DV)==top20[i]),], main=top20[i], xlab="position DV", ylab="Normalized gene expression")
+  plot(as.numeric(gsub("X", "", colnames(LML))), LML[which(rownames(LML)==top20[i]),], main=top20[i], xlab="position LM", ylab="Normalized gene expression")
+  plot(as.numeric(gsub("X", "", colnames(PA))), PA[which(rownames(PA)==top20[i]),], main=top20[i], xlab="position AP", ylab="Normalized gene expression")
+}
+```
+
+**Figure 30.** markers
+
+```{r top20DVDEGs, echo=FALSE, message=FALSE, warning=FALSE}
+top20<-DEGsDV[which((DEGsDV %in% rownames(DV)) & (DEGsDV %in% rownames(LML)) & (DEGsDV %in% rownames(PA)))][1:20]
+
+par(mfrow=c(3, 3))
+for(i in (1:20)){
+  plot(as.numeric(gsub("X", "", colnames(DV))), DV[which(rownames(DV)==top20[i]),], main=top20[i], xlab="position DV", ylab="Normalized gene expression")
+  plot(as.numeric(gsub("X", "", colnames(LML))), LML[which(rownames(LML)==top20[i]),], main=top20[i], xlab="position LM", ylab="Normalized gene expression")
+  plot(as.numeric(gsub("X", "", colnames(PA))), PA[which(rownames(PA)==top20[i]),], main=top20[i], xlab="position AP", ylab="Normalized gene expression")
+}
+```
+
+**Figure 30.** Top20 DV DEGs
+
+```{r top20LMDEGs, echo=FALSE, message=FALSE, warning=FALSE}
+top20<-DEGsLML[which((DEGsLML %in% rownames(DV)) & (DEGsLML %in% rownames(LML)) & (DEGsLML %in% rownames(PA)))][1:20]
+
+par(mfrow=c(3, 3))
+for(i in (1:20)){
+  plot(as.numeric(gsub("X", "", colnames(DV))), DV[which(rownames(DV)==top20[i]),], main=top20[i], xlab="position DV", ylab="Normalized gene expression")
+  plot(as.numeric(gsub("X", "", colnames(LML))), LML[which(rownames(LML)==top20[i]),], main=top20[i], xlab="position LM", ylab="Normalized gene expression")
+  plot(as.numeric(gsub("X", "", colnames(PA))), PA[which(rownames(PA)==top20[i]),], main=top20[i], xlab="position AP", ylab="Normalized gene expression")
+}
+```
+
+**Figure 30.** Top20 LM DEGs
+
+```{r top20APDEGs, echo=FALSE, message=FALSE, warning=FALSE}
+top20<-DEGsPA[which((DEGsPA %in% rownames(DV)) & (DEGsPA %in% rownames(LML)) & (DEGsPA %in% rownames(PA)))][1:20]
+
+par(mfrow=c(3, 3))
+for(i in (1:20)){
+  plot(as.numeric(gsub("X", "", colnames(DV))), DV[which(rownames(DV)==top20[i]),], main=top20[i], xlab="position DV", ylab="Normalized gene expression")
+  plot(as.numeric(gsub("X", "", colnames(LML))), LML[which(rownames(LML)==top20[i]),], main=top20[i], xlab="position LM", ylab="Normalized gene expression")
+  plot(as.numeric(gsub("X", "", colnames(PA))), PA[which(rownames(PA)==top20[i]),], main=top20[i], xlab="position AP", ylab="Normalized gene expression")
+}
+```
+
+**Figure 30.** Top20 AP DEGs
+
+```{r ComparetoChemSDEGs0.18, echo=FALSE, message=FALSE, warning=FALSE}
+DEGsChems.18<-read.csv("../../DEGsChemSensFDR0.18.csv", stringsAsFactors = FALSE, header=F, sep=";")
+colnames(DEGsChems.18)<-DEGsChems.18[2,]
+DEGsChems.18<-DEGsChems.18[-(1:2),]
+
+DEGsChems.51<-read.csv("../../DEGsChemSensFDR0.51.csv", stringsAsFactors = FALSE, header=F, sep=";")
+colnames(DEGsChems.51)<-DEGsChems.51[2,]
+DEGsChems.51<-DEGsChems.51[-(1:2),]
+
+DEGsbox<-unique(c(DEGsDV, DEGsLML, DEGsPA))
+
+DEGsboxDEGsChems.18_venn<-venn.diagram(list(DEGSbox=DEGsbox, DEGsChemS0.18=DEGsChems.18$`gene name`), fill = c("red", "blue"), hyper.test = TRUE, total.population = min(dim(DV)[1], dim(LML)[1], dim(PA)[1]), lower.tail = FALSE, alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, cat.pos = c(-10,10), sub.cex = 1.5, filename = NULL, scaled=T)
+
+grid.draw(DEGsboxDEGsChems.18_venn)
+
+```
+
+**Figure 2.** Venn Diagram showing the overlap between our differentially expressed genes and the ones found in https://academic.oup.com/chemse/article/43/6/427/5001524#118517741 with FDR<0.18
+
+```{r ComparetoChemSDEGs0.51, echo=FALSE, message=FALSE, warning=FALSE}
+DEGsboxDEGsChems.51_venn<-venn.diagram(list(DEGSbox=DEGsbox, DEGsChemS0.51=DEGsChems.51$`gene name`), fill = c("red", "blue"), hyper.test = TRUE, total.population = min(dim(DV)[1], dim(LML)[1], dim(PA)[1]), lower.tail = FALSE, alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, cat.pos = c(-10,10), sub.cex = 1.5, filename = NULL, scaled=T)
+
+grid.draw(DEGsboxDEGsChems.51_venn)
+
+```
+
+**Figure 3.** Venn Diagram showing the overlap between our differentially expressed genes and the ones found in https://academic.oup.com/chemse/article/43/6/427/5001524#118517741 with FDR<0.51
+
+```{r ComparetoChemSDEGs2, echo=FALSE, message=FALSE, warning=FALSE}
+DEGs_inter<-intersect(DEGsChems.51$`gene name`, DEGsbox)
+old<-DEGsChems.51$`gene name`[-which(DEGsChems.51$`gene name` %in% DEGs_inter)]
+new<-DEGsbox[-which(DEGsbox %in% DEGs_inter)]
+
+background<-intersect(rownames(DV), rownames(LML))
+background<-intersect(background, rownames(PA))
+
+old<-old[old %in% background]
+par(mfrow=c(3, 3))
+for(i in (1:12)){
+  plot(as.numeric(gsub("X", "", colnames(DV))), DV[which(rownames(DV)==old[i]),], main=old[i], xlab="position DV", ylab="Normalized gene expression")
+  plot(as.numeric(gsub("X", "", colnames(LML))), LML[which(rownames(LML)==old[i]),], main=old[i], xlab="position LML", ylab="Normalized gene expression")
+  plot(as.numeric(gsub("X", "", colnames(PA))), PA[which(rownames(PA)==old[i]),], main=old[i], xlab="position AP", ylab="Normalized gene expression")
+}
+```
+
+**Figure 30.** Some differentially expressed genes in ChemSenses paper which we don't get
+
+Here we can see that we did not get many counts for some of these genes which were previously found as differentially expressed.
+
+```{r ComparetoChemSDEGs3, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow=c(3, 3))
+for(i in (1:12)){
+  plot(as.numeric(gsub("X", "", colnames(DV))), DV[which(rownames(DV)==DEGs_inter[i]),], main=DEGs_inter[i], xlab="position DV", ylab="Normalized gene expression")
+  plot(as.numeric(gsub("X", "", colnames(LML))), LML[which(rownames(LML)==DEGs_inter[i]),], main=DEGs_inter[i], xlab="position LML", ylab="Normalized gene expression")
+  plot(as.numeric(gsub("X", "", colnames(PA))), PA[which(rownames(PA)==DEGs_inter[i]),], main=DEGs_inter[i], xlab="position AP", ylab="Normalized gene expression")
+}
+```
+
+**Figure 31.** Some differentially expressed genes in ChemSenses paper which we get
+
+```{r compareToMiy}
+
+ZoneIndexes<-read.csv("../../ORsZoneIndexesNewNames.csv", stringsAsFactors = FALSE, header=F, dec = ",")
+colnames(ZoneIndexes)<-ZoneIndexes[2,]
+ZoneIndexes<-ZoneIndexes[-(1:2),]
+ZoneIndexes$`zone index`<-gsub(",", ".", ZoneIndexes$`zone index`)
+ZoneIndexes$`modern gene name`<-gsub("-", ".", ZoneIndexes$`modern gene name`)
+
+DEORsboxDEORsMiy_venn<-venn.diagram(list(DEORsbox=DEORs, DEORsMiy=ZoneIndexes$`modern gene name`), fill = c("red", "blue"), hyper.test = TRUE, total.population = length(union(unique(c(rownames(PA)[grep("Olfr", rownames(PA))], rownames(DV)[grep("Olfr", rownames(DV))], rownames(LML)[grep("Olfr", rownames(LML))])), ZoneIndexes$`modern gene name`)), lower.tail = FALSE, alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, cat.pos = c(-10,10), sub.cex = 1.5, filename = NULL, scaled=T)
+
+grid.draw(DEORsboxDEORsMiy_venn)
+
+```
+
+**Intersection between Miyamichi et al ORs and our DEORs**
+
+```{r compareToMiy2}
+
+ORsboxDEORsMiy_venn<-venn.diagram(list(ORsbox=unique(c(rownames(PA)[grep("Olfr", rownames(PA))], rownames(DV)[grep("Olfr", rownames(DV))], rownames(LML)[grep("Olfr", rownames(LML))])), DEORsMiy=ZoneIndexes$`modern gene name`), fill = c("red", "blue"), hyper.test = TRUE, total.population = length(union(unique(c(rownames(PA)[grep("Olfr", rownames(PA))], rownames(DV)[grep("Olfr", rownames(DV))], rownames(LML)[grep("Olfr", rownames(LML))])), ZoneIndexes$`modern gene name`)), lower.tail = FALSE, alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, cat.pos = c(-10,10), sub.cex = 1.5, filename = NULL, scaled=T)
+
+grid.draw(ORsboxDEORsMiy_venn)
+
+```
+
+**Intersection between Miyamichi et al ORs and our detected ORs**
+
+```{r PropsIntersection, message=FALSE, warning=FALSE}
+
+## Get Props correlating with PC1s
+
+meaningfulPropsDV<-read.csv("../supp_tables/newDV_corOdorSpacePCs_PChProps_G99.csv", stringsAsFactors = FALSE, header=TRUE, row.names=1)
+PropsDV<-rownames(meaningfulPropsDV)[which(meaningfulPropsDV$corFDR_PCh_PC1<0.01)]
+meaningfulPropsLML<-read.csv("../supp_tables/newLML_corOdorSpacePCs_PChProps_G99.csv", stringsAsFactors = FALSE, header=TRUE, row.names=1)
+PropsLML<-rownames(meaningfulPropsLML)[which(meaningfulPropsLML$corFDR_PCh_PC1<0.01)]
+meaningfulPropsAP<-read.csv("../supp_tables/newAP_corOdorSpacePCs_PChProps_G99.csv", stringsAsFactors = FALSE, header=TRUE, row.names=1)
+PropsAP<-rownames(meaningfulPropsAP)[which(meaningfulPropsAP$corFDR_PCh_PC1<0.01)]
+
+#plot intersection
+
+noProps<-dim(meaningfulPropsDV)[1]
+
+interVennProps<-venn.diagram(list(DV=PropsDV, LM=PropsLML, AP=PropsAP), fill = c("red", "blue", "green"), hyper.test = TRUE, total.population = noProps, lower.tail = FALSE, alpha = c(0.5, 0.5, 0.5), cex = 2, cat.cex = 2, sub.cex = 1.5, filename = NULL, scaled=T)
+
+newList<-intersect(PropsDV, PropsLML)
+newList<-intersect(newList, PropsAP)
+
+write.csv(newList, "../supp_tables/PC1corPropsIntersection.csv")
+
+#pdf(file = "../figures_pdf2/Fig5C.1.pdf", width=5, height = 5)
+grid.draw(interVennProps)
+#dev.off()
+
+APextraProps<-setdiff(PropsAP, union(PropsDV, PropsLML))
+DVextraProps<-setdiff(PropsDV, union(PropsAP, PropsLML))
+LMLextraProps<-setdiff(PropsLML, union(PropsDV, PropsAP))
+write.csv(APextraProps, "../supp_tables/PC1corPropsAPunique.csv")
+write.csv(DVextraProps, "../supp_tables/PC1corPropsDVunique.csv")
+write.csv(LMLextraProps, "../supp_tables/PC1corPropsLMLunique.csv")
+
+intersectDVLM<-intersect(PropsDV, PropsLML)
+intersectDVLM<-intersectDVLM[-which(intersectDVLM %in% newList)]
+write.csv(intersectDVLM, "../supp_tables/PC1corPropsDVLMunique.csv")
+
+intersectDVAP<-intersect(PropsDV, PropsAP)
+intersectDVAP<-intersectDVAP[-which(intersectDVAP %in% newList)]
+write.csv(intersectDVAP, "../supp_tables/PC1corPropsDVAPunique.csv")
+
+intersectAPLM<-intersect(PropsAP, PropsLML)
+intersectAPLM<-intersectAPLM[-which(intersectAPLM %in% newList)]
+write.csv(intersectAPLM, "../supp_tables/PC1corPropsAPLMunique.csv")
+
+propsIntersect<-intersect(PropsDV, PropsLML)
+propsIntersect<-intersect(propsIntersect, PropsAP)
+
+propsPC1sCorMat<-data.frame(PC1_DV=meaningfulPropsDV[propsIntersect,]$corPCh_PC1, PC1_LM=meaningfulPropsLML[propsIntersect,]$corPCh_PC1, PC1_AP=meaningfulPropsAP[propsIntersect,]$corPCh_PC1)
+rownames(propsPC1sCorMat)<-propsIntersect
+propsPC1sCorMat<-propsPC1sCorMat[order(-abs(propsPC1sCorMat$PC1_DV)),]
+
+library(RColorBrewer)
+palette1<-colorRampPalette(c("blue", "white", "red"))
+
+#pdf(file = "../figures_pdf2/Fig5C.2.pdf", width=5, height = 5)
+heatmap.2(as.matrix(propsPC1sCorMat[1:20,]), trace='none', key.title=NA, key.ylab=NA, col=palette1, cexRow = 0.6, key.xlab = "Cor.coefficient", breaks=seq(-1, 1,0.1), cexCol = 0.8)
+#dev.off()
+
+## Another one 2 axes intersections
+interestingProps<-c(intersectDVLM[1:20], intersectDVAP[1:20], intersectAPLM[1:20])
+
+propsPC1sCorMat2<-data.frame(PC1_DV=meaningfulPropsDV[interestingProps,]$corPCh_PC1, PC1_LM=meaningfulPropsLML[interestingProps,]$corPCh_PC1, PC1_AP=meaningfulPropsAP[interestingProps,]$corPCh_PC1)
+rownames(propsPC1sCorMat2)<-interestingProps
+
+
+#pdf(file = "../figures_pdf2/Fig5C.2.2.pdf", width=5, height = 8)
+heatmap.2(as.matrix(propsPC1sCorMat2), trace='none', key.title=NA, key.ylab=NA, col=palette1, cexRow = 0.6, key.xlab = "Cor.coefficient", breaks=seq(-1, 1,0.1), cexCol = 0.8, keysize = 1, Rowv = F)
+#dev.off()
+
+## Another one on unique props per axis
+interestingProps<-c(DVextraProps[1:20], APextraProps[1:20], LMLextraProps[1:20])
+
+propsPC1sCorMat2<-data.frame(PC1_DV=meaningfulPropsDV[interestingProps,]$corPCh_PC1, PC1_LM=meaningfulPropsLML[interestingProps,]$corPCh_PC1, PC1_AP=meaningfulPropsAP[interestingProps,]$corPCh_PC1)
+rownames(propsPC1sCorMat2)<-interestingProps
+
+
+#pdf(file = "../figures_pdf2/Fig5C.2.3.pdf", width=5, height = 8)
+heatmap.2(as.matrix(propsPC1sCorMat2), trace='none', key.title=NA, key.ylab=NA, col=palette1, cexRow = 0.6, key.xlab = "Cor.coefficient", breaks=seq(-1, 1,0.1), cexCol = 0.8, keysize = 1, Rowv = F)
+#dev.off()
+#col=viridis(length(seq(-1, 1,0.1))-1)
+```
+
+Then I used Iterational Proportional Fitting for modeling 2D and 3D expression patterns in the MOE based on 1D expression
+
+```{r DEGsDiffmapAlt, echo=FALSE, message=FALSE, warning=FALSE, eval=FALSE, include=FALSE}
+
+data1<-read.csv("./allDEGs3D_dataset_fitVals_countsFormat.csv", stringsAsFactors = F, row.names = 1, header = T)
+
+colnames(data1)<-gsub("X", "", colnames(data1))
+
+ORs<-data1[grep("Olfr", rownames(data1)),]
+
+ORsDiffmap<-DiffusionMap(deORs[grep("Olfr", rownames(deORs)),], distance ="rankcor")
+clusters_DEORs<-clusters_deORs[grep("Olfr", rownames(deORs))]
+ORcolsM<-ORcols[grep("Olfr", rownames(deORs))]
+ORsClassCol<-classCol[grep("Olfr", rownames(deORs))]
+ORsZoneCol<-zoneCol[grep("Olfr", rownames(deORs))]
+#normalized Differentially Expressed OR genes
+
+#ORsDiffmap<-DiffusionMap(data.frame(names(test.dist)), distance =test.dist) #normalized Differentially Expressed OR genes
+
+#fit<-principal_curve(cbind(ORsDiffmap$DC1, ORsDiffmap$DC2), smoother = "lowess", stretch = 2) 
+#plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(clusters_deORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+#lines(fit, col="red")
+
+#fit<-principal_curve(cbind(ORsDiffmap$DC1, ORsDiffmap$DC2), stretch = 2) 
+#plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(clusters_deORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+#lines(fit, col="red")
+
+fit<-principal_curve(cbind(ORsDiffmap$DC1, ORsDiffmap$DC2), smoother = "periodic_lowess", stretch = 2) #periodic_lowess to allow fitting a circle, stretch to avoid points bunching at the end of the curve
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(clusters_DEORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+lines(fit, col="red")
+
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(clusters_DEORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(classCol, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(ORcolsM, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(ORsZoneCol, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+projection<-project_to_curve(cbind(ORsDiffmap$DC1, ORsDiffmap$DC2), fit$s)
+plot(projection$s, col=alpha(clusters_DEORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+dpt <- DPT(ORsDiffmap, tips=which(names(clusters_DEORs)=="Olfr372")) #pseudotime
+
+#pdf(file = "./figures_pdf2/Fig2F_all.1.pdf", width=5, height = 5)
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(plot.DPT(dpt)$data$ColourExpl, 0.3), pch=19, xlab="DC1", ylab="DC2")
+#dev.off()
+
+#plot.DPT(dpt)
+
+pseudotime<-plot.DPT(dpt)$data$Colour
+names(pseudotime)<-rownames(deORs)[grep("Olfr", rownames(deORs))]
+
+#identify first gene in diffmap from magenta cluster
+#clusters_deORs[which(ORsDiffmap$DC1==min(ORsDiffmap$DC1[which(clusters_deORs=="magenta" & ORsDiffmap$DC1<0.01 & ORsDiffmap$DC1>0 & ORsDiffmap$DC2<(-0.02))]))]
+#Olfr1102
+
+#identify first gene in DCs projection from magenta cluster
+#clusters_deORs[which(projection$s[,1]==max(projection$s[,1][which(clusters_deORs=="magenta" & projection$s[,1]<0 & projection$s[,2]>0.02)]))]
+#Olfr935
+
+#most dorsal OR in Miyamichi paper
+#cluster2index[cluster2index$myIndx==1,]
+#Olfr372
+```
+
+**3D dataset ORs Diffmap**
+
+```{r DEGsjitterplotDPTalt, echo=FALSE, message=FALSE, warning=FALSE, eval=FALSE, include=FALSE}
+cluster2dpt<-clusters_deORs[match(ZoneIndexes$`modern gene name`, names(clusters_deORs))]
+cluster2dpt<-data.frame(ZoneIndexes, Cluster=cluster2dpt)
+cluster2dpt<-cluster2dpt[-which(is.na(cluster2dpt$Cluster)),]
+cluster2dpt<-data.frame(cluster2dpt, myIndx=pseudotime[match(cluster2dpt$modern.gene.name, names(pseudotime))])
+
+#pdf(file = "./figures_pdf2/Fig2F_all.2.pdf", width=5, height = 5)
+plot(x=cluster2dpt$myIndx, y=cluster2dpt$zone.index, col=alpha(cluster2dpt$Cluster, 0.3), xlab="Indexes by DPT", ylab="Zone index by Miyamichi", pch=19)
+#dev.off()
+
+cor.test(as.numeric(cluster2dpt$myIndx), as.numeric(cluster2dpt$zone.index), method = "spearman")
+```
+
+**Figure 18** DPT Zone indexes per spatial expression cluster
+
+```{r dfgj, eval=FALSE, include=FALSE}
+
+#Pseudotime indexes
+ORDPTindexes<-pseudotime[match(DEGsfile$Gene.name, names(pseudotime))]
+names(ORDPTindexes)<-DEGsfile$Gene.name
+#Convert pseudotime indexes to Miyamichi indexes
+ORDPTindexes4pred<-data.frame(myIndx=ORDPTindexes)
+mod<-lm(zone.index ~ myIndx, data=cluster2dpt)
+summary(mod)
+ORMiyIndexes<-predict(mod, data.frame(ORDPTindexes4pred))
+
+```
+
+##Genomic clustering
+
+```{r Association_Pattern-GenPositionDEGs, message=FALSE, warning=FALSE, eval=FALSE, include=FALSE}
+#Test if there is an association between genes' position in the genome and their spatial expresssion pattern
+#add Miyamichi indexes (including predicted ones) to ORs data table
+ORs_data$index<-pseudotime[match(ORs_data$Gene.name, names(pseudotime))]
+#ORs_data$index<-ORMiyIndexes[match(ORs_data$Gene.name, names(ORMiyIndexes))]
+ORs_data$clusters<-clusters_deORs[match(ORs_data$Gene.name, names(clusters_deORs))]
+
+
+#Add norm. distance to genomic cluster start and end 
+ORs_data$dist2genClustStart<-sapply(1:dim(ORs_data)[1], function(x){min(c(abs(ORs_data$Gene.start..bp.[x]-ORs_data$start[x]), abs(ORs_data$Gene.end..bp.[x]-ORs_data$start[x])))/ORs_data$Length.of.cluster[x]})
+
+ORs_data$dist2genClustEnd<-sapply(1:dim(ORs_data)[1], function(x){min(c(abs(ORs_data$end[x]-ORs_data$Gene.start..bp.[x]), abs(ORs_data$end[x]-ORs_data$Gene.end..bp.[x])))/ORs_data$Length.of.cluster[x]})
+
+deORs_data<-ORs_data[match(rownames(deORs), ORs_data$Gene.name),]
+deORs_data<-deORs_data[-grep("NA", rownames(deORs_data)),]
+
+plotGenesFromCluster(data=deORs_data, cluster="blue", clustersColName="clusters", chromosomesColName="Chromosome.scaffold.name", startPosColName="Gene.start..bp.", endPosColName="Gene.end..bp.", genome="mm10", main="Blue cluster ORs positions in chromosomes")
+
+tbl<-table(deORs_data$gen_clust, deORs_data$clusters)
+tbl
+
+chisq.test(tbl)
+chisq.test(tbl, simulate.p.value = TRUE)
+
+ORs_data2<-ORs_data
+colnames(ORs_data2)[which(colnames(ORs_data2)=="start")]<-"genClustStart"
+colnames(ORs_data2)[which(colnames(ORs_data2)=="end")]<-"genClustEnd"
+ORs_data2<-ORs_data2[,-which(colnames(ORs_data2)=="index")]
+ORs_data2<-ORs_data2[,-which(colnames(ORs_data2)=="clusters")]
+#colnames(ORs_data2)[which(colnames(ORs_data2)=="index")]<-"DPTindex"
+#colnames(ORs_data2)[which(colnames(ORs_data2)=="clusters")]<-"patternClusters"
+write.csv(ORs_data2, "./supp_tables/ORs_genomicFeatures_mmusGRCm38.99.csv")
+rm(ORs_data2)
+```
+
+**Table 3.** Number of genes per spatial expression cluster in each genomic cluster. (Columns=Spatial pattern clusters, Rows=Genomic clusters)
+
+```{r PatternDistvsGenDistORs, echo=FALSE, message=FALSE, warning=FALSE, eval=FALSE, include=FALSE}
+DEORsfile<-DEGsfile[grep("Olfr", DEGsfile$Gene.name),]
+DEORs<-deORs[grep("Olfr", DEGsfile$Gene.name),]
+
+#Patterns Distance
+
+#for(i in unique(DEORsfile$Chromosome.scaffold.name)){
+#  cor.mat<-cor(t(DEORs[which(DEORsfile$Chromosome.scaffold.name==i),]),method="spearman")
+#  assign(paste("PatternDistChr.", i, sep="") ,sqrt(0.5*((1-cor.mat))))
+#}
+
+#DPT index distance
+
+for(i in unique(DEORsfile$Chromosome.scaffold.name)){
+  if(length(which(DEORsfile$Chromosome.scaffold.name==i))>1){
+    patDist.mat<-sapply(which(DEORsfile$Chromosome.scaffold.name==i), function(x){abs(DEORsfile$ORDPTindexes[x]-DEORsfile$ORDPTindexes[which(DEORsfile$Chromosome.scaffold.name==i)])})
+    rownames(patDist.mat)<-DEORsfile$Gene.name[which(DEORsfile$Chromosome.scaffold.name==i)]
+    colnames(patDist.mat)<-DEORsfile$Gene.name[which(DEORsfile$Chromosome.scaffold.name==i)]
+    assign(paste("PatternDistChr.", i, sep=""), patDist.mat)
+  }
+}
+
+#Genomic distance
+for(i in unique(DEORsfile$Chromosome.scaffold.name)){
+  if(length(which(DEORsfile$Chromosome.scaffold.name==i))>1){
+    genDist.mat<-sapply(which(DEORsfile$Chromosome.scaffold.name==i), function(x){abs(DEORsfile$Gene.start..bp.[x]-DEORsfile$Gene.start..bp.[which(DEORsfile$Chromosome.scaffold.name==i)])})
+    rownames(genDist.mat)<-DEORsfile$Gene.name[which(DEORsfile$Chromosome.scaffold.name==i)]
+    colnames(genDist.mat)<-DEORsfile$Gene.name[which(DEORsfile$Chromosome.scaffold.name==i)]
+    assign(paste("GenDistChr.", i, sep=""), genDist.mat)
+  }
+}
+
+GenDist<-vector()
+PatternDist<-vector()
+for(i in 1:length(ls(patt="GenDistChr"))){
+  GenDist<-c(GenDist, get(ls(patt="GenDistChr")[i]))
+  PatternDist<-c(PatternDist, get(ls(patt="PatternDistChr")[i]))
+}
+
+log10GenDist<-log10(GenDist+1)
+
+meansLog10GenDist<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){mean(log10GenDist[log10GenDist>=x&log10GenDist<(x+0.5)])})
+meansLog10PattDist<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){mean(PatternDist[log10GenDist>=x&log10GenDist<(x+0.5)], na.rm=T)})
+sdLog10PattDist<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){sd(PatternDist[log10GenDist>=x&log10GenDist<(x+0.5)], na.rm=T)})
+seLog10PattDist<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){std(PatternDist[log10GenDist>=x&log10GenDist<(x+0.5)])})
+groupSizes<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){length(log10GenDist[log10GenDist>=x&log10GenDist<(x+0.5)])})
+
+meansLog10GenDist<-meansLog10GenDist[-c(1, which(groupSizes<10))]
+meansLog10PattDist<-meansLog10PattDist[-c(1, which(groupSizes<10))]
+sdLog10PattDist<-sdLog10PattDist[-c(1, which(groupSizes<10))]
+seLog10PattDist<-seLog10PattDist[-c(1, which(groupSizes<10))]
+groupSizes<-groupSizes[-c(1, which(groupSizes<10))]
+
+#plot(meansLog10GenDist, meansLog10PattDist, ylim=c(0, 1), xlim=c(0, 8.5), pch=19, xlab="log10(Genomic Distance)", ylab="Pattern Distance")
+cor.test(meansLog10GenDist, meansLog10PattDist, method = "spearman")
+
+#pdf(file = "./figures_pdf2/FigS3B_DV.pdf", width=5, height = 5)
+plot(meansLog10GenDist, meansLog10PattDist, ylim=c(0, max(meansLog10PattDist)+150), xlim=c(0, 8.5), pch=19, xlab="log10(Genomic Distance)", ylab="Pattern Distance")
+arrows(meansLog10GenDist, meansLog10PattDist-sdLog10PattDist, meansLog10GenDist, meansLog10PattDist+sdLog10PattDist, length=0.05, angle=90, code=3)
+set.seed(10)
+abline(h=mean(sample(PatternDist, 500), na.rm=T))
+#dev.off()
+```
+
+**Chemical senses plot DEORs**
+
+
+```{r seeds2D, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#Seeds 2D
+
+#Projections fuction
+
+getProjectionXY<-function(obj3d){
+  seed<-matrix(0, dim(obj3d)[1], dim(seed.3d)[2])
+  for(i in 1:(dim(obj3d)[1])){
+    for(j in 1:(dim(seed.3d)[2])){
+      if(1 %in% seed.3d[i,j,]){
+        seed[i,j]<-1
+      }
+    }
+  }
+  return(seed)
+}
+
+getProjectionXZ<-function(obj3d){
+  seed<-matrix(0, dim(obj3d)[1], dim(seed.3d)[3])
+  for(i in 1:(dim(obj3d)[1])){
+    for(j in 1:(dim(seed.3d)[3])){
+      if(1 %in% seed.3d[i,,j]){
+        seed[i,j]<-1
+      }
+    }
+  }
+  return(seed)
+}
+
+getProjectionYZ<-function(obj3d){
+  seed<-matrix(0, dim(obj3d)[2], dim(seed.3d)[3])
+  for(i in 1:(dim(obj3d)[2])){
+    for(j in 1:(dim(seed.3d)[3])){
+      if(1 %in% seed.3d[,i,j]){
+        seed[i,j]<-1
+      }
+    }
+  }
+  return(seed)
+}
+
+#obj3d is the 3d object of which you want to get a projection
+
+seedDVLML<-getProjectionXY(seed.3d)
+image(seedDVLML)
+
+seedDVPA<-getProjectionXZ(seed.3d)
+image(seedDVPA)
+
+seedLMLPA<-getProjectionYZ(seed.3d)
+image(seedLMLPA)
+```
+
+**Figure x.** Projections DVxLML, DVxPA, LMLxPA
+
+```{r IPF2D, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#round100<-function(x){x=(round(x/100))*100; return(x)}
+
+#while((round(rowSums(projDVLML, na.rm=T))[-which(is.na(targetDV))]!=round(targetDV)[-which(is.na(targetDV))])|(round(colSums(projDVLML, na.rm=T))[-which(is.na(targetLML))]!=round(targetLML)[-which(is.na(targetLML))])){
+
+ipf2D<-function(seed, targetx, targety, nodecs){
+  h=1
+  iter1<-rep(1, length(c(targetx, targety)))
+  iter2<-rep(0, length(c(targetx, targety)))
+  while("FALSE" %in% (round(iter1, nodecs)==round(iter2, nodecs))){
+  #while(h<(numIter+1)){
+  
+    for(i in 1:dim(seed)[1]){
+     seed[i,]<-seed[i,]*targetx[i]/sum(seed[i,],na.rm=T)
+    }
+  
+    for(i in 1:dim(seed)[2]){
+      seed[,i]<-seed[,i]*targety[i]/sum(seed[,i], na.rm=T)
+    }
+    if((h %% 2)==0){
+      iter2<-c(rowSums(seed), colSums(seed))
+    }else{
+      iter1<-c(rowSums(seed), colSums(seed))
+    }
+    h=h+1
+  }
+  seed[is.na(seed)]<-0 #We can get NA values if targets are 0
+  return(seed)
+}
+#corr=correlation level we want to achieve
+
+#projDVLML<-ipf2D(seed=seedDVLML, targetx=target.DV, targety = target.LML, nodecs=10)
+
+#M2D<-melt(seedDVLML)
+#M2=melt(projDVLML)
+#names(M2)<-c("DV",  "LML", "value")
+#M2<-M2[-which(M2D$value==0),]
+#M2$value<-log10(M2$value+1)
+#my_palette <- colorRampPalette(c("darkviolet", "yellow", "red"))(n = 100)
+
+#plot_ly(M2, x = ~DV, y = ~LML, color = ~value, colors = my_palette)
+```
+
+**Figure x.** 2D reconstructions
+
+```{r IPF3Dopt, echo=FALSE, message=FALSE, warning=FALSE, eval=FALSE, include=FALSE}
+ipf3D<-function(seed, targetx, targety, targetz, nodecs){
+  h=1
+  iter1<-rep(1, length(c(targetx, targety, targetz)))
+  iter2<-rep(0, length(c(targetx, targety, targetz)))
+  while("FALSE" %in% (round(iter1, nodecs)==round(iter2, nodecs))){
+  #while(h<(numIter+1)){
+  
+    for(i in 1:dim(seed)[1]){
+     seed[i,,]<-seed[i,,]*targetx[i]/sum(seed[i,,],na.rm=T)
+    }
+    
+    for(i in 1:dim(seed)[2]){
+     seed[,i,]<-seed[,i,]*targety[i]/sum(seed[,i,],na.rm=T)
+    }
+    
+    for(i in 1:dim(seed)[3]){
+     seed[,,i]<-seed[,,i]*targetz[i]/sum(seed[,,i],na.rm=T)
+    }
+    
+    if((h %% 2)==0){
+      iter2<-c(apply(seed, 1, sum), apply(seed, 2, sum), apply(seed, 3, sum))
+    }else{
+      iter1<-c(apply(seed, 1, sum), apply(seed, 2, sum), apply(seed, 3, sum))
+    }
+    h=h+1
+  }
+  seed[is.na(seed)]<-0 #We can get NA values if targets are 0
+  #seed[which(seed=="NaN")]<-0
+  return(seed)
+}
+
+```
+
+**Figure 11.** 3D Reconstruction
+
+```{r 2Dplots1, echo=FALSE, message=FALSE, warning=FALSE, eval=FALSE, include=FALSE}
+j=1
+for(i in seq(1, max(M3$PA), 10)){
+  mt2<-data.frame(DV=M3$DV[M3$PA==i], LML=M3$LML[M3$PA==i], val=M3$value[M3$PA==i])
+  if(sum(mt2$val)==0){
+    assign(paste("p", j, sep=""), plot_ly(mt2, x = ~DV, y = ~LML, color = 1, colors = "gray", showlegend=FALSE) %>% layout(xaxis = list(range = c(0, dim(struc3d)[1])), yaxis = list(range = c(0, dim(struc3d)[2]))) %>% hide_colorbar())
+  }else{
+    assign(paste("p", j, sep=""), plot_ly(mt2, x = ~DV, y = ~LML, color = ~val, colors = my_palette2, showlegend=FALSE) %>% layout(xaxis = list(range = c(0, dim(struc3d)[1])), yaxis = list(range = c(0, dim(struc3d)[2]))) %>% colorbar(limits = c(0,log10(max(struc3d)))) %>% hide_colorbar())
+  }
+j=j+1
+}
+varlist<-ls(pattern="p[[:digit:]]")
+plotlist<-list()
+for(i in 1:length(varlist)){
+  plotlist[[i]]<-get(varlist[i])
+}
+subplot(plotlist, nrows=3, titleX = T, shareX = T, shareY = T)
+```
+
+**Figure 12.** Slices (DV x LML) of 3D reconstruction
+
+```{r 2Dplots2, echo=FALSE, message=FALSE, warning=FALSE, eval=FALSE, include=FALSE}
+rm(list=varlist)
+j=1
+for(i in seq(1, max(M3$LML), 10)){
+  mt2<-data.frame(DV=M3$DV[M3$LML==i], PA=M3$PA[M3$LML==i], val=M3$value[M3$LML==i])
+  if(sum(mt2$val)==0){
+    assign(paste("p", j, sep=""), plot_ly(mt2, x = ~DV, y = ~PA, color = 1, colors = "gray", showlegend=FALSE) %>% layout(xaxis = list(range = c(0, dim(struc3d)[1])), yaxis = list(range = c(0, dim(struc3d)[2]))) %>% hide_colorbar())
+  }else{
+    assign(paste("p", j, sep=""), plot_ly(mt2, x = ~DV, y = ~PA, color = ~val, colors = my_palette2, showlegend=FALSE) %>% layout(xaxis = list(range = c(0, dim(struc3d)[1])), yaxis = list(range = c(0, dim(struc3d)[3]))) %>% colorbar(limits = c(0,log10(max(struc3d)))) %>% hide_colorbar())
+  }
+j=j+1
+}
+varlist<-ls(pattern="p[[:digit:]]")
+plotlist<-list()
+for(i in 1:length(varlist)){
+  plotlist[[i]]<-get(varlist[i])
+}
+subplot(plotlist, nrows=3, titleX = T, shareX = T, shareY = T)
+```
+
+**Figure 13.** Slices (DV x PA) of 3D reconstruction
+
+```{r 2Dplots3, echo=FALSE, message=FALSE, warning=FALSE, eval=FALSE, include=FALSE}
+rm(list=varlist)
+j=1
+for(i in seq(1, max(M3$DV), 10)){
+  mt2<-data.frame(LML=M3$LML[M3$DV==i], PA=M3$PA[M3$DV==i], val=M3$value[M3$DV==i])
+  if(sum(mt2$val)==0){
+    assign(paste("p", j, sep=""), plot_ly(mt2, x = ~LML, y = ~PA, color = 1, colors = "gray", showlegend=FALSE) %>% layout(xaxis = list(range = c(0, dim(struc3d)[1])), yaxis = list(range = c(0, dim(struc3d)[2]))) %>% hide_colorbar())
+  }else{
+    assign(paste("p", j, sep=""), plot_ly(mt2, x = ~LML, y = ~PA, color = ~val, colors = my_palette2, showlegend=FALSE) %>% layout(xaxis = list(range = c(0, dim(struc3d)[2])), yaxis = list(range = c(0, dim(struc3d)[3]))) %>% colorbar(limits = c(0,log10(max(struc3d)))) %>% hide_colorbar())
+  }
+j=j+1
+}
+varlist<-ls(pattern="p[[:digit:]]")
+plotlist<-list()
+for(i in 1:length(varlist)){
+  plotlist[[i]]<-get(varlist[i])
+}
+subplot(plotlist, nrows=3, titleX = T, shareX = T, shareY = T)
+```
+
+**Figure 14.** Slices (LML x PA) of 3D reconstruction
+
+```{r 1Dplotsfrom3D, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+sumsxy<-matrix(0, dim(seed.3d)[1], dim(seed.3d)[2])
+sumsxz<-matrix(0, dim(seed.3d)[1], dim(seed.3d)[3])
+sumsyz<-matrix(0, dim(seed.3d)[2], dim(seed.3d)[3])
+
+#sumxy
+for(i in 1:dim(sumsxy)[2]){
+  for(j in 1:dim(sumsxy)[1]){
+    sumsxy[j, i]<-sum(struc3d[j,i,], na.rm=T)
+  }
+}
+#sumxz
+for(i in 1:dim(sumsxz)[2]){
+  for(j in 1:dim(sumsxz)[1]){
+    sumsxz[j, i]<-sum(struc3d[j,,i], na.rm=T)
+  }
+}
+#sumyz
+for(i in 1:dim(sumsyz)[2]){
+  for(j in 1:dim(sumsyz)[1]){
+    sumsyz[j, i]<-sum(struc3d[,j,i], na.rm=T)
+  }
+}
+
+plot(target.LML, ylim=c(0, 70000), xlab="Position LML", ylab="Gene expression (scaled to 1000000 counts)")
+lines(colSums(sumsxy), col="red")
+
+plot(target.DV, ylim=c(0, 70000), xlab="Position DV", ylab="Gene expression (scaled to 1000000 counts)")
+lines(rowSums(sumsxy), col="red")
+    
+plot(target.PA, ylim=c(0, 70000), xlab="Position PA", ylab="Gene expression (scaled to 1000000 counts)")
+lines(colSums(sumsxz), col="red")
+```
+
+```{r 1Dplotsfrom3Dopt, echo=FALSE, message=FALSE, warning=FALSE, eval=FALSE, include=FALSE}
+plot(target.DV, ylim=c(0, 70000), xlab="Position DV", ylab="Gene expression (scaled to 1000000 counts)")
+lines(apply(struc3d, 1, sum), col="red")
+
+plot(target.LML, ylim=c(0, 70000), xlab="Position LML", ylab="Gene expression (scaled to 1000000 counts)")
+lines(apply(struc3d, 2, sum), col="red")
+
+plot(target.PA, ylim=c(0, 70000), xlab="Position PA", ylab="Gene expression (scaled to 1000000 counts)")
+lines(apply(struc3d, 3, sum), col="red")
+```
+
+
+**Figure 13.** Comparison of our initial 1D data with the sums of gene expression values across axes of the 3D model (dots=1D normalized data, line=sums across axes of the 3D model)
+
+

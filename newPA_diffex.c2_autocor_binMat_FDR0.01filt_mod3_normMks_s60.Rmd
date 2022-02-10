@@ -1,0 +1,3305 @@
+---
+title: "AP differential expression"
+author: "Mayra L. Ruiz Tejada Segura"
+date: "30/11/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r AssembleDataset, echo=FALSE, message=FALSE, warning=FALSE}
+#getwd()
+#setwd("/Users/mayra.ruiz/Desktop/SpatialTranscriptomics_USB/newData/current/REALIGN")
+
+#PA_dataset<-read.csv("./PA_dataset_G99.csv", stringsAsFactors = FALSE, sep="\t", row.names = 1, header=FALSE)
+
+#colnames(PA_dataset)<-paste(PA_dataset[1,], 1:dim(PA_dataset)[2], sep="")
+#PA_dataset<-PA_dataset[,-grep("0610005C13Rik", colnames(PA_dataset))]
+
+#PA_names<-read.csv("./PAsample_names_G99.csv", header=FALSE, stringsAsFactors = FALSE)
+
+#PA_names<-PA_names[,1]
+#PA_names<-gsub(".counts.csv", "", PA_names)
+#colnames(PA_dataset)<-PA_names
+
+#write.csv(PA_dataset, "./PA_datasetNew_G99.csv")
+```
+
+
+```{r Functions, echo=FALSE, message=FALSE, warning=FALSE}
+library(edgeR)
+library(viridis)
+library(gplots)
+library(RColorBrewer)
+library(scales)
+library(scran)
+library(tseries)
+library(fUnitRoots)
+library(lmtest)
+library(hwwntest)
+require(dynamicTreeCut)
+require(WGCNA)
+require(Rtsne)
+library(matrixStats)
+library(locfit)
+library(umap)
+#library(karyoploteR)
+library(VennDiagram)
+library(gdata)
+library(destiny)
+library(princurve)
+library(randomForest)
+require(caTools)
+require(moduleColor)
+library(rfUtilities)
+library(ape)
+
+rpm<-function(x){x*1000000/sum(x)} #get reads per million
+
+getHTseqDataQCstats<-function(statsData, expressionData, totalNoReads, genomic_features){ 
+  #statsData=Dataframe containing the 5 quality statistics htseq returns at the end of counts matrices (no_feature, ambiguous, tooLowaQual, not_aligned and alignment_not_unique), expressionData=the rest of htseq dataset without qc stats, totalNoReads=vector containing total number of reads per sample, genomic_features=dataframe of genomic features of genes in expression matrix with minimum one column called "Chromosome.scaffold.name"
+  
+  statsData[6,]<-apply(expressionData, 2, sum)
+rownames(statsData)[6]<-"__uniquelyAligned"
+
+  statsData[7,]<-totalNoReads
+  rownames(statsData)[7]<-"__total"
+
+  statsData[8,]<-100*statsData[6,]/statsData[7,]
+  rownames(statsData)[8]<-"__percent_uniquelyMapped"
+
+  statsData[9,]<-100*statsData[1,]/statsData[6,]
+  rownames(statsData)[9]<-"__percent_uniqueNoFeature"
+
+  statsData[10,]<-100*statsData[2,]/statsData[6,]
+  rownames(statsData)[10]<-"__percent_uniqueAmbiguous"
+
+  statsData[11,]<-apply(apply(expressionData, 2, rpm), 2, function(x){length(which(x>10))})
+  rownames(statsData)[11]<-"__detected_genes"
+
+  statsData[12,]<-100*apply(expressionData[which(genomic_features$Chromosome.scaffold.name=="MT"),], 2, sum)/statsData[6,]
+  rownames(statsData)[12]<-"__percent_uniqueReads_mapped_to_mit"
+  
+  return(statsData)
+}
+
+plotQCstats<-function(statsData, rows, x, xlab, col, legend_names, legend_colors, ycut, xcut){ #plot some QC stats
+  #statsData=stats QC data frame got before, rows=vector with row indexes from rows of statsData that we want to plot, x=values we want to have in x axis, xlab, col=vector of colors for each sample, legend_names=meaning of each color, legend_colors=colors used for the samples, ycut and xcut = vectors of quality thresholds for axis y and x of each plot
+  count=1
+  for(i in rows){
+    plot(x, as.numeric(stats[i,]), main=rownames(statsData)[i], ylab="", xlab=xlab, col=alpha(col, 0.3), pch=19)
+    abline(h=ycut[count])
+    abline(v=xcut[count])
+    count=count+1
+  }
+
+  plot(1, type="n", axes=FALSE, xlab="", ylab="")
+  legend("bottomright", legend_names, pch=19, col=alpha(legend_colors, 0.3))
+}
+
+getSamplesPerBatch<-function(batchVector, totalSamplesPerBatch){ #get numbers and percentages of good and bad samples per batch
+  #batchVector=Vector indicating the batch each sample comes from, totalSamplesPerBatch= named vector containing total number of samples per batch
+  
+  batch_data<-data.frame(matrix(NA, nrow=length(unique(batchVector)), ncol=4))
+  colnames(batch_data)<-c("#Good", "%Good", "#Bad", "%Bad")
+  rownames(batch_data)<-sort(unique(batchVector))
+  for(i in rownames(batch_data)){
+    batch_data[i, ]<-c(length(batchVector[grep(i, batchVector)]), 100*length(batchVector[grep(i, batchVector)])/totalSamplesPerBatch[i], totalSamplesPerBatch[i]-length(batch[grep(i, batchVector)]), 100-(100*length(batchVector[grep(i, batchVector)])/totalSamplesPerBatch[i]))
+  }
+  return(batch_data)
+}
+
+filterGenes<-function(data, minPercentSamples, minNormCounts){ 
+  #data=matrix of (normalized) counts with rows=genes, minNormCounts=minimum number of counts a sample must have of a gene to count it as expressed,  minPercentSamples=minimum percentage of samples that must express a gene to keep it
+  emptySamplesNo<-apply(data, 1, function(x){length(which(x<minNormCounts))})
+  expGenes<-which(emptySamplesNo<=round((1-minPercentSamples/100)*dim(data)[2]))
+  data<-data[expGenes,]
+  return(data)
+}
+
+getHVGs<-function(data){ #get Highly variable genes from dataset using log10 (normalized) counts as a starting point
+  log_data<-as.matrix(log10(data+1))
+  fit <- fitTrendVar(as.matrix(log10(data+1)))
+  decomp <- decomposeVar(log_data, fit)
+  decomp<-decomp[order(decomp$bio, decreasing=TRUE),]
+  return(data[match(rownames(decomp)[which(decomp$FDR<0.1)], rownames(data)),] )
+}
+
+getHVGs<-function(data){ #get Highly variable genes from dataset using log10 (normalized) counts as a starting point
+  log_data<-as.matrix(log10(data+1))
+  decomp <- modelGeneVar(log_data)
+  #top.hvgs <- getTopHVGs(decomp, fdr.threshold=0.1)
+  top.hvgs <- getTopHVGs(decomp)
+  return(data[match(top.hvgs, rownames(data)),] )
+}
+
+plotXYcorrelation<-function(x, y, main, xlab, ylab, col, ylim=c(min(y, na.rm=T), max(y, na.rm=T)), xlim=c(min(x, na.rm=T), max(x, na.rm=T))){
+  #x=values in x axis, y=values in y axis, xlab=x axis name, ylab=y axis name, col=vector of colors per sample
+  plot(x, y, main=main, ylab=ylab, xlab=xlab, col=alpha(col, 0.3), cex.main=1, cex=0.8, pch=19, ylim=ylim, xlim=xlim)
+  abline(lm(y~x))
+  mtext(c(paste("R=", round(cor.test(x, y, method="spearman")$estimate, digits=2), "\t", "\t", "p=", cor.test(x, y, method="spearman")$p.value)), side=3, cex=0.6)
+}
+
+plotGenesInEachBatch<-function(data, genes, x, batches, batchColors, xlab, ylab, ylim){
+  #x=values for each sample in data (samples in columns) that can go in the x axis (from all batches), data=(normalized) gene expression data: genes=rows, samples=columns, genes=genes to be plotted, batches=a pattern pewr batch (which must be present in the column names of data to identify samples from each batch), batchColors=colors to use per batch, xlab, ylab=labels for x and y axes
+  for(gene in genes){
+    plot(x[grep(batches[1], colnames(data))], data[gene,grep(batches[1], colnames(data))], xlim=c(0, max(sapply(batches, function(j){length(grep(j, colnames(data)))}))), col=alpha(batchColors[1], 0.3), main=gene, xlab=xlab, ylab=ylab, pch=19, ylim=ylim)
+    for(i in 2:length(batches)){
+      lines(x[grep(batches[i], colnames(data))], data[gene,grep(batches[i], colnames(data))], type="p", col=alpha(batchColors[i], 0.3), pch=19)
+    }
+  }
+
+  plot(1, type="n", axes=FALSE, xlab="", ylab="")
+  legend("topright", batches, pch=19, col=alpha(batchColors, 0.3))
+}
+
+
+batchSubset<-function(data, batch, positions){
+  #data=(normalized) gene expression data: genes=rows, samples=columns, position=positions for each sample in data (from all batches), batch=a pattern for the batch we want (which must be present in the column names of data to identify samples from that batch)
+  tmp<-matrix(NA, dim(data)[1], max(positions[grep(batch, colnames(data))]))
+  tmp[,positions[grep(batch, colnames(data))]]<-data[, grep(batch, colnames(data))]
+  colnames(tmp)<-paste(batch, 1:max(positions[grep(batch, colnames(data))]), sep="-")
+  rownames(tmp)<-rownames(data)
+  return(tmp)
+}
+
+findEqPositions<-function(df1, df2){ #find which positions from df2 correspond to the ones in df1 df1 and df2 are data frames of gene expression where each row is a gene and each column is a position. Empty positions are columns of NAs. This returns a list of 3 elements: the range of positions of df2 which is equivalent to positions in df1, the vector of correlation coefficients for all genes in df1 and df2 taking the range of slices from df2 that give the maximum sum of correlations when compared to slices in df1, and the data frame of correlation coefficients for all genes in df1 and df2 taking all possible ranges of slices
+  corsDF<-as.data.frame(rep(0, dim(df1)[1]))
+  corsMax<-rep(0, min(dim(df1)[2], dim(df2)[2]))
+  maxCorsSum<-0
+  eqRange<-c(firstPos=1, lastPos=dim(df1)[2])
+  for(i in 1:(1+dim(df2)[2]-dim(df1)[2])){
+    cors<-sapply(1:dim(df1)[1], function(x){cor(df1[x,], df2[x,i:(dim(df1)[2]+i-1)], use="complete.obs", method="spearman")})
+    corsDF<-cbind(corsDF, cors)
+    if(sum(cors, na.rm=T)>maxCorsSum){
+      maxCorsSum<-sum(cors, na.rm=T)
+      corsMax=cors
+      eqRange<-c(firstPos=i, lastPos=dim(df1)[2]+i-1)
+    }
+  }
+  colnames(corsDF)<-paste("Slice1=", 0:(dim(corsDF)[2]-1), sep="")
+  return(list(eqRange, corsMax, corsDF))
+}
+
+
+std <- function(x) sd(x)/sqrt(length(x)) #standard error of the mean
+
+plotMeanDetectedGenesPerPosition<-function(data, thresh, positions, errorBars, xlab){
+  #data= (normalized) counts matrix, thresh=number of counts a gene has to have to be considered detected in a sample, positions=vector indicating the position pf each sample on data, errorBars="SE" or "SD", xlab=x axis label
+  detGenes<-apply(data, 2, function(x){length(which(x>thresh))})
+  meanDetGenes<-sapply(unique(positions), function(x){mean(detGenes[which(positions==x)])})
+  seDetGenes<-sapply(unique(positions), function(x){std(detGenes[which(positions==x)])})
+  sdvDetGenes<-sapply(unique(positions), function(x){sd(detGenes[which(positions==x)])})
+  plot(1:length(unique(positions)), meanDetGenes, pch=19, xlab=xlab, ylab="no. Detected genes", ylim=c(0, dim(data)[1]))
+  if(errorBars=="SE"){
+    arrows(1:length(unique(positions)), meanDetGenes-seDetGenes, 1:length(unique(positions)), meanDetGenes+seDetGenes, length=0.05, angle=90, code=3)
+  }else{
+    arrows(1:length(unique(positions)), meanDetGenes-sdvDetGenes, 1:length(unique(positions)), meanDetGenes+sdvDetGenes, length=0.05, angle=90, code=3)
+  }
+}
+
+gm_mean = function(x, na.rm=TRUE){ #geometric mean
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+
+normalizeByMarkersGeoMean<-function(data, markers){
+  #data= (normalized) counts matrix, markers=markers to use for normalizsing
+  norm_markers<-t(data[markers,])
+  markersGeoMeans<-apply(norm_markers, 1, gm_mean)
+  normData<-t(apply(data, 1, function(x){x*mean(markersGeoMeans)/markersGeoMeans}))
+  return(normData)
+}
+
+binarizeData<-function(data){ #make binary matrix of expression depending on the gene having an expression value higher than its median asross samples or not
+  #data=counts matrix to binarize rows=genes columns=samples
+  x<-rep(NA, dim(data)[2])
+  pvals<-rep(NA, dim(data)[1])
+  binMat<-matrix(NA, dim(data)[1], dim(data)[2])
+  colnames(binMat)<-colnames(data)
+  rownames(binMat)<-rownames(data)
+  for(i in 1:dim(data)[1]){
+    x[data[i,]<=median(data[i,])]<-0
+    x[data[i,]>median(data[i,])]<-1
+    binMat[i,]<-x
+  }
+  return(binMat)
+}
+
+
+getDEGcandidatesFlags<-function(data, groupSize, minMinsMean4FC, minMaxsMean4FC, minFC, minDiff){#get binary vector to classify genes to decide if they will be evaluated or not depending on their expression variance in groups of samples of minimum and maximum expression. Fold change between maximum expression group and minimum expression group, and/or means difference between these groups can be used
+  #data=counts matrix rows=genes, columns=samples, groupSize=number of samples per group compared, minFC=minimum fold change between groups, minMinsMean4FC=minimum value for the mean of the group of minimum expression values to look at groups fold change, minMaxsMean4FC=minimum value for the mean of the group of maximum expression values to look at groups fold change, minFC=minimum fold change in expression these groups of samples must have for a gene to be a candidate for analysis, minDiff=minimum difference between the mean expression of these groups of samples for a gene to be a candidate for analysis
+  flags<-rep(0, dim(data)[1])
+  for(i in 1:length(flags)){
+    mins<-sort(data[i,])[1:groupSize]
+    maxs<-sort(data[i,])[(dim(data)[2]-(groupSize-1)):dim(data)[2]]
+    if((mean(mins)>=minMinsMean4FC)&(mean(maxs)>=minMaxsMean4FC)){
+      if((mean(maxs)/mean(mins))>=minFC){flags[i]<-1}
+    }else{
+      if((mean(maxs)-mean(mins))>minDiff){flags[i]<-1}
+    }
+  }
+  return(flags)
+}
+
+autocorrelationTest<-function(data, maxLag, filter){#perform autocorrelations for each row (gene) and perform Ljung-Box test to know if these values are signifficantly different from what would be expected by chance, genes with FDR=2 were not evaluated
+  #data=counts matrix with rows=genes and columns=samples, maxLag=maximum lag between autocorrelated positions, filter=vector of 0s and 1s saying if that gene will be evaluated (1) or not (0)
+  autocor<-apply(data[(filter==1),], 1, function(x){Box.test(ts(x), type = "Ljung-Box", lag=maxLag)})
+  genes.table<-data.frame(genes.names=rownames(data))
+  genes.table$filter<-filter
+  genes.table$Xsq<-0
+  genes.table$Xsq[genes.table$filter==1]<-sapply(1:length(autocor), function(x){autocor[[x]]$statistic})
+  genes.table$genes.pvals=rep(2, length(filter))
+  genes.table$genes.pvals[genes.table$filter==1]<-sapply(1:length(autocor), function(x){autocor[[x]]$p.value})
+  genes.table$FDR<-2
+  genes.table$FDR[genes.table$filter==1]<-p.adjust(genes.table$genes.pvals[genes.table$filter==1], method="fdr")
+
+  genes.table<-genes.table[order(-genes.table$Xsq),]
+  return(genes.table)
+}
+
+normBetween0and1<-function(x){(x-min(x))/(max(x)-min(x))}
+
+plotMeanPatternPerCluster<-function(data, clusters, ylim, ylab, xlab){
+  #data=counts matrix with rows=genes and columns=samples or positions, clusters=named vector containing the clusters (by colors) to which each gene belongs with names=genes, ylim=limits for y axis, ylab and xlab = labels for y and x axes respectively
+  for(i in unique(clusters)){
+    means<-colMeans(data[which(clusters==i),])
+    plot(means, ylim=ylim, main=i, ylab=ylab, xlab=xlab, type="l")
+    sapply(rownames(data)[which(clusters==i)], function(x){lines(data[x,], col=alpha(i, 0.1))})
+    lines(means, lwd=2)
+  }
+}
+
+getMaxPositionPerCluster<-function(data, clusters){
+  #data=counts matrix with rows=genes and columns=samples or positions, clusters=named vector containing the clusters (by colors) to which each gene belongs with names=genes
+  maxPos<-numeric(length(unique(clusters)))
+  names(maxPos)<-unique(clusters)
+  c=1
+  for(i in unique(clusters)){
+    means<-colMeans(data[which(clusters==i),])
+    maxPos[c]<-which(means==max(means))
+    c=c+1
+  }
+  return(maxPos)
+}
+
+plotClusterJitter<-function(x, y, xlabels, col, xlab, ylab){
+  #x=values in x axis, y=values in y axis, slabels=labels for each element in x axis, col=color per dot, xlab and ylab =label for x and y axes
+  plot(y ~ jitter(x, 1), pch = 19, axes=FALSE, col=alpha(col, 0.3), xlab=xlab, ylab=ylab)
+  axis(1, at=unique(sort(x)), labels=xlabels)
+  axis(2)
+}
+
+assignGenomicClusters<-function(data, maxDist, chromosomesColName, startPosColName){
+  #data=data frame with genes' genomic features, maxDist=maximum distance between positions in one and another gene, chromosomesColName=name of the column where chromosome to whicg each gene belongs is indicated, startPosColName=name of column of data with gene start positions
+  clust<-character()
+  for(j in unique(data[,chromosomesColName])){
+    sel<-which(data[,chromosomesColName]==j)
+    data[sel,]<-data[sel,][order(data[sel, startPosColName]),]
+    clust[sel[1]]<-paste(j, ".", 1, sep="")
+    x<-1
+    i<-2
+    thr<-maxDist
+    while(i<=length(sel)){
+      if(data[sel[i], startPosColName]<=data[sel[i-1], startPosColName]+thr){
+        clust[sel[i]]<-paste(j, ".", x, sep="")
+      } else{
+        x<-x+1
+        clust[sel[i]]<-paste(j, ".", x, sep="")
+      }
+      i<-i+1
+    }
+  }
+  return(clust)
+}
+
+plotGenesFromCluster<-function(data, cluster, clustersColName, chromosomesColName, startPosColName, endPosColName, genome, main){#Visualize genes from one cluster in the Karyoplot
+  #data=data frame with genes' genomic features, cluster=name of the cluster we want to visualize in the karyoplot, clustersColName=name of column containing clusters, chromosomesColName=name of the column where chromosome to whicg each gene belongs is indicated, startPosColName=name of column of data with gene start positions, endPosColName=name of column of data with gene end positions, genome=name of the genome version used to align eg:"mm10"
+  clustData<-data[which(data[,clustersColName]==cluster),]
+  kpClust <- toGRanges(data.frame(chr=paste("chr", clustData[,chromosomesColName], sep=""), start=clustData[,startPosColName], end=clustData[,endPosColName]))
+  kp1 <- plotKaryotype(genome=genome, main=main)
+  kpPlotRegions(kp1, kpClust, col=clustData[,clustersColName])
+}
+
+#Assign islands
+findClosestIsland<-function(gene, genesData, islandsData, islandsChrCol, genesChrCol, genesNamesCol, islandsStartCol, islandsEndCol, genesStartCol, islandsNamesCol){
+  tmp<-islandsData[which(islandsData[,islandsChrCol]==genesData[,genesChrCol][genesData[,genesNamesCol]==gene]),]
+  distances<-data.frame(abs(tmp[,islandsStartCol]-genesData[,genesStartCol][genesData[,genesNamesCol]==gene]), abs(tmp[,islandsEndCol]-genesData[,genesStartCol][genesData[,genesNamesCol]==gene])) #Distances from gene start to island start or end
+  distances<-apply(distances, 1, min)
+  minDist<-distances[which(distances==min(distances))]
+  closestIsland<-tmp[,islandsNamesCol][which(distances==min(distances))]
+  return(c(minDist, closestIsland))
+}
+```
+
+```{r}
+#cellPropsNusvr<-read.csv("./supp_tables/cellTypesProps_nusvr_AP.csv", row.names=1)
+cellPropsNusvr<-read.csv("./supp_tables/cellTypesProps_nusvr_T2_AP.csv", row.names=1)
+#colnames(cellPropsNusvr)<-c("HBC", "INP", "GBC", "SC", "iOSN", "MVC", "mOSN")
+colnames(cellPropsNusvr)<-c("HBC", "INP", "GBC", "SC", "OSN", "MVC")
+cellPropsNusvr<-t(apply(cellPropsNusvr, 1, function(x){x/sum(x)}))
+#cellPropsNnls<-read.csv("./supp_tables/cellTypesProps_nnls_AP.csv", row.names=1)
+cellPropsNnls<-read.csv("./supp_tables/cellTypesProps_nnls_T2_AP.csv", row.names=1)
+#colnames(cellPropsNnls)<-c("HBC", "INP", "GBC", "SC", "iOSN", "MVC", "mOSN")
+colnames(cellPropsNnls)<-c("HBC", "INP", "GBC", "SC", "OSN", "MVC")
+cellPropsNnls<-t(apply(cellPropsNnls, 1, function(x){x/sum(x)}))
+
+
+#pdf(file = "./figures_pdf2/FigCellDeconvNNLS_AP_rev.pdf", width=5, height = 5)
+pdf(file = "./figures_pdf2/FigCellDeconvNNLS_T2_AP_rev.pdf", width=5, height = 5)
+par(mfrow=c(2, 2))
+for(cell in colnames(cellPropsNnls)){
+  plot(1:dim(cellPropsNnls)[1], cellPropsNnls[,cell], xlim=c(0, dim(cellPropsNnls)[1]), main=paste("Nnls", cell), xlab="position AP", ylab="proportion", pch=19, ylim=c(0, 0.5))
+  lines(locfit(cellPropsNnls[,cell]~lp(1:dim(cellPropsNnls)[1], deg = 2, nn=1), data=as.data.frame(cellPropsNnls)), col="red")
+}
+
+par(mfrow=c(2, 2))
+for(cell in colnames(cellPropsNnls)){
+  plot(1:dim(cellPropsNnls)[1], cellPropsNnls[,cell], xlim=c(0, dim(cellPropsNnls)[1]), main=paste("Nnls", cell), xlab="position AP", ylab="proportion", pch=19, ylim=c(0, max(cellPropsNnls[,cell])))
+  lines(locfit(cellPropsNnls[,cell]~lp(1:dim(cellPropsNnls)[1], deg = 2, nn=1), data=as.data.frame(cellPropsNnls)), col="red")
+}
+dev.off()
+
+#pdf(file = "./figures_pdf2/FigCellDeconvNuSVR_AP_rev.pdf", width=5, height = 5)
+pdf(file = "./figures_pdf2/FigCellDeconvNuSVR_T2_AP_rev.pdf", width=5, height = 5)
+par(mfrow=c(2, 2))
+for(cell in colnames(cellPropsNusvr)){
+  plot(1:dim(cellPropsNusvr)[1], cellPropsNusvr[,cell], xlim=c(0, dim(cellPropsNusvr)[1]), main=paste("Nusvr", cell), xlab="position AP", ylab="proportion", pch=19, ylim=c(0, 0.5))
+  lines(locfit(cellPropsNusvr[,cell]~lp(1:dim(cellPropsNusvr)[1], deg = 2, nn=1), data=as.data.frame(cellPropsNusvr)), col="red")
+}
+
+par(mfrow=c(2, 2))
+for(cell in colnames(cellPropsNusvr)){
+  plot(1:dim(cellPropsNusvr)[1], cellPropsNusvr[,cell], xlim=c(0, dim(cellPropsNusvr)[1]), main=paste("Nusvr", cell), xlab="position AP", ylab="proportion", pch=19, ylim=c(0, max(cellPropsNusvr[,cell])))
+  lines(locfit(cellPropsNusvr[,cell]~lp(1:dim(cellPropsNusvr)[1], deg = 2, nn=1), data=as.data.frame(cellPropsNusvr)), col="red")
+}
+
+dev.off()
+
+binMat_CT<-binarizeData(data=t(cellPropsNusvr))
+CT_table<-autocorrelationTest(data=binMat_CT, maxLag=(dim(binMat_CT)[2]-10), filter=rep(1, dim(binMat_CT)[1]))
+#write.csv(CT_table, "./supp_tables/SDEtest_cellTypeProps_NusvrAP.csv")
+write.csv(CT_table, "./supp_tables/SDEtest_cellTypeProps_Nusvr_T2_AP.csv")
+
+binMat_CT<-binarizeData(data=t(cellPropsNnls))
+CT_table<-autocorrelationTest(data=binMat_CT, maxLag=(dim(binMat_CT)[2]-10), filter=rep(1, dim(binMat_CT)[1]))
+#write.csv(CT_table, "./supp_tables/SDEtest_cellTypeProps_NnlsAP.csv")
+write.csv(CT_table, "./supp_tables/SDEtest_cellTypeProps_Nnls_T2_AP.csv")
+
+pdf(file = "./figures_pdf2/FigCellDeconvNuSVR_HM_T2_AP_rev.pdf", width=5, height = 5)
+heatmap.2(t(cellPropsNusvr), Colv = NA, Rowv=NA, trace='none', key.title=NA, key.ylab=NA, key.xlab="CT_fraction", breaks=seq(0,0.5,0.1), col=viridis_pal(), cexRow = 0.5, cexCol = 0.5)
+dev.off()
+
+#CT_tableNoBin<-autocorrelationTest(data=t(cellPropsNusvr), maxLag=(dim(cellPropsNusvr)[1]-10), filter=rep(1, dim(cellPropsNusvr)[2]))
+```
+
+
+```{r Quality_checkMod, echo=FALSE, message=FALSE, warning=FALSE}
+
+totalReads<-read.csv("./PA_totalReads_G99.csv", header=FALSE, stringsAsFactors = FALSE)
+totalReads<-gsub("\\|", "\\,", totalReads)
+totalReads<-gsub("\t", "", totalReads)
+totalReads<-gsub(" ", "", totalReads)
+totalReads<-strsplit(totalReads, split = ",")
+totalReads<-as.numeric(totalReads[[1]][-1])
+
+AP_dataset<-read.csv("./PA_datasetNew_G99.csv", header=TRUE, stringsAsFactors = FALSE, row.names = 1)
+
+expr<-as.matrix(AP_dataset[1:(dim(AP_dataset)[1]-5),])
+stats<-AP_dataset[(dim(AP_dataset)[1]-4):dim(AP_dataset)[1],]
+
+rm(AP_dataset)
+
+genes_data<-read.csv("./mmus-GRCm38.p6_G99.csv", stringsAsFactors = F, header=T)
+genes_data$length<-genes_data$Gene.end..bp.-genes_data$Gene.start..bp.
+genes_data<-genes_data[match(rownames(expr), genes_data$Gene.name),]
+
+stats<-getHTseqDataQCstats(statsData=stats, expressionData=expr, totalNoReads=totalReads, genomic_features=genes_data)
+
+col<-rep("red", dim(expr)[2])
+col[91:170]<-"blue" #AP2
+col[171:248]<-"green" #AP3
+
+#col[grep("AP2", names(stats))]<-"blue"
+#col[grep("AP3", names(stats))]<-"green"
+ythresholds<-rep(NA, 5)
+xthresholds<-rep(NA, 5)
+
+par(mfrow=c(3, 2), mar=c(4,2,2,2))
+
+plotQCstats(statsData = stats, rows = c(8:12), x=as.numeric(log10(stats[7,]+1)), xlab="log10(total reads+1)", col=col, legend_names=c("AP1", "AP2", "AP3"), legend_colors=c("red", "blue", "green"), ycut = ythresholds, xcut = xthresholds)
+```
+
+
+**Figure 1.** Quality statistics of samples
+
+The quality of the dataset looks ok, not many genes mapped to mitochondrial genome and not many low quality reads. We have high percentages of not aligned reads though. I decided to filter the samples that had less than 15% aligned reads to not eliminate so many samples (although I already lose many in that step). 
+
+We looked at olfactory neurons' maturity markers to select samples based on neuron density.
+
+```{r OSN_markers, echo=FALSE, message=FALSE, warning=FALSE}
+marker_heat<-log10(expr[c("Omp", "Gnal", "Cnga2"),]+1)
+
+#pdf_file = "./figures_pdf2/FigS1E.pdf"
+pdf(file = "./figures_pdf2/FigS1E_AP.pdf", width=5, height = 5)
+heatmap.2(as.matrix(marker_heat), xlab="", trace='none', key.title=NA, key.ylab=NA, col=viridis(length(seq(0,6,0.1))-1), cexRow = 0.8, key.xlab = "log10geneExp", labCol = FALSE, breaks=seq(0,6,0.1), Rowv=F)
+dev.off()
+
+write.csv(marker_heat, "./supp_tables/log10NeuronalMksAP.csv")
+```
+
+**Figure 2.** Neuronal markers expression heatmap.
+
+
+##Sample selection
+
+As mentioned before, I eliminated the samples with less than 15% mapped reads, the ones with less than 1000 detected genes, the ones with more than 8% mitochondrial reads and the ones with log(totalNo.ofReads)<5.5.
+
+I also eliminated the ones that don't express the 3 neuronal markers, which was just one, but it seems to be a strong outlier as having that sample changed the PCA results a lot.
+
+```{r Selection, echo=FALSE, message=FALSE}
+
+#Selection
+
+#col=c(rep("green", dim(expr)[2]))
+
+col[which(stats[8,]<50)]<-"black" # %uniquely mapped reads >= 50
+col[which(stats[11,]<4000)]<-"black" # detected genes >=4000
+col[which(stats[12,]>20)]<-"black" # %unique reads mapped to mit. <= 20
+col[as.numeric(log10(stats[7,]+1))<5]<-"black" #log(totalNumberofReads+1)>=5
+#col[expr["Omp",]==0]<-"black"
+#col[expr["Gnal",]==0]<-"black"
+#col[expr["Cnga2",]==0]<-"black"
+col[expr["Omp",]<1]<-"black"
+col[expr["Gnal",]<1]<-"black"
+col[expr["Cnga2",]<1]<-"black"
+
+```
+
+The statistics of our selected samples look as follows:
+
+```{r Selected_QStats, echo=FALSE, message=FALSE}
+
+ythresholds<-rep(NA, 5)
+ythresholds[1]<-50
+ythresholds[4]<-4000
+ythresholds[5]<-20
+xthresholds<-rep(NA, 5)
+xthresholds<-rep(5, 5)
+
+par(mfrow=c(3, 2), mar=c(4,2,2,2))
+plotQCstats(statsData = stats, rows = c(8:12), x=as.numeric(log10(stats[7,]+1)), xlab="log10(total reads+1)", col=col, legend_names=c("Not Selected", "Selected_AP1", "Selected_AP2", "Selected_AP3"), legend_colors=c("black", "red", "blue", "green"), ycut = ythresholds, xcut = xthresholds)
+
+
+```
+
+**Figure 3.** Quality statistics for not selected and selected samples.
+
+Here we can see the distribution of quality statistics among our selected samples.
+
+```{r Selected_QStats_Box, echo=FALSE, message=FALSE}
+
+selection<-which(col!="black")
+color_selection<-col
+#par(mfrow=c(1, 1))
+#par(mfrow=c(2, 2))
+
+pdf(file = "./figures_pdf2/FigS1A_AP.pdf", width=5, height = 5)
+boxplot(as.numeric(stats[8, selection]), main=rownames(stats)[8], ylim=c(40, 100), xlab="AP axis")
+dev.off()
+
+pdf(file = "./figures_pdf2/FigS1C_AP.pdf", width=5, height = 5)
+boxplot(as.numeric(log10(stats[11, selection]+1)), main=paste("log10", rownames(stats)[11], sep=""), ylim=c(2,5), xlab="AP axis")
+dev.off()
+
+pdf(file = "./figures_pdf2/FigS1B_AP.pdf", width=5, height = 5)
+boxplot(as.numeric(stats[12, selection]), main=rownames(stats)[12], ylim=c(0, 20), xlab="AP axis")
+dev.off()
+
+pdf(file = "./figures_pdf2/FigS1D_AP.pdf", width=5, height = 5)
+boxplot(as.numeric(log10(stats[7, selection]+1)), main="Total no. of reads (log10)", ylim=c(4.5, 8), xlab="AP axis")
+dev.off()
+
+#position<-1:37
+```
+
+
+**Figure 4.** Stats of good samples
+
+Then we plotted the number of Posterior and Anterior samples that we selected. Most of the samples we selected are from the posterior area.
+
+
+```{r No.Samples, echo=FALSE, message=FALSE}
+write.csv(stats, "./supp_tables/newAP_QCstats_G99.csv")
+write.csv(stats[,selection], "./supp_tables/newAP_selected_QCstats_G99.csv")
+
+position<-c(rev(1:90), rev(1:80), rev(1:78))
+sel_positions<-position[selection]
+selected<-expr[, selection] #select samples with nice quality stats
+
+batch<-col[which(col!="black")]
+batch[which(batch=="red")]<-"AP1"
+batch[which(batch=="blue")]<-"AP2"
+batch[which(batch=="green")]<-"AP3"
+rawDS<-selected
+colnames(rawDS)<-paste(batch, sel_positions, sep="-")
+write.csv(rawDS, "./supp_tables/newAP_rawQCdone_G99.csv")
+rm(rawDS)
+
+par(mfrow=c(1, 1))
+plot(c(length(sel_positions[sel_positions<40]), length(sel_positions[sel_positions>=40])), xaxt='n', xlab="", ylab="", ylim=c(0, 150), pch=19, cex=4, col=c("red", "blue"), main="Number of samples per area")
+legend("bottomright", c("Anterior", "Posterior"), pch=19, col=c("red", "blue"))
+```
+
+
+**Figure 5.** Number of dorsal (1-41) and ventral (42-83) samples selected
+
+```{r Normalization, echo=FALSE, message=FALSE, warning=FALSE}
+
+#rpm normalization
+selected<-selected[-which(rowSums(selected)==0),] #Eliminate genes with 0 counts
+normalized<-apply(selected, 2, rpm)
+
+write.csv(normalized, "./newAPnormalized.rpmJust-0s_G99.csv")
+
+batch<-col[which(col!="black")]
+batch[which(batch=="red")]<-"AP1"
+batch[which(batch=="blue")]<-"AP2"
+batch[which(batch=="green")]<-"AP3"
+write.csv(normalized[, which(batch=="AP1")], "./supp_tables/newAPnormalized_b1.rpmJust-0s_G99.csv")
+write.csv(normalized[, which(batch=="AP2")], "./supp_tables/newAPnormalized_b2.rpmJust-0s_G99.csv")
+write.csv(normalized[, which(batch=="AP3")], "./supp_tables/newAPnormalized_b3.rpmJust-0s_G99.csv")
+
+#DESeq normalisation: It takes the genes that don't have 0s in expression values across samples to calculate the normalization factors SI (norm.val=exp/SI) -> check how many genes dont have 0s across samples [>100])
+
+#ceros_per_gene<-apply(selected, 1, function(x){length(which(x==0))})
+#length(which(ceros_per_gene==0))
+#854
+
+#Good and bad samples per batch
+
+initSamplesPerBatch<-c(90, 80, 78) #initial number of samples we had per batch
+names(initSamplesPerBatch)<-c("AP1", "AP2", "AP3")
+
+write.csv(getSamplesPerBatch(batchVector = batch, totalSamplesPerBatch = initSamplesPerBatch), "./supp_tables/APgoodSamplesPerBatch.csv")
+#getSamplesPerBatch(batchVector = batch, totalSamplesPerBatch = initSamplesPerBatch)
+```
+
+**Table 1.** Good (selected) and bad (not selected) samples per batch
+
+In order to see if the samples clustered in some way based on our expression data, we performed a principal components analysis.
+
+```{r PCA, echo=FALSE, message=FALSE, warning=FALSE}
+#eliminate genes expressed (expressed = minimum one count) in just one replicate or in less than 10% of samples
+oneRepGenes<-data.frame(b1=rowSums(normalized[,which(batch=="AP1")])>1, b2=rowSums(normalized[,which(batch=="AP2")])>1, b3=rowSums(normalized[,which(batch=="AP3")])>1)
+
+oneRepGenes[oneRepGenes==TRUE]<-1
+oneRepGenes[oneRepGenes==FALSE]<-0
+
+oneRepGenes<-rownames(oneRepGenes)[rowSums(oneRepGenes)<2]
+
+normalized<-normalized[-which(rownames(normalized) %in% oneRepGenes),]
+normalized<-filterGenes(data = normalized, minPercentSamples = 10, minNormCounts = 1)
+
+## Highly Variable Genes
+#3165 HVGs
+
+#top.hvgs <- order(decomp$bio, decreasing=TRUE)
+
+HVGsB1<-rownames(getHVGs(data=normalized[,which(batch=="AP1")]))[1:3000]
+HVGsB2<-rownames(getHVGs(data=normalized[,which(batch=="AP2")]))[1:3000]
+HVGsB3<-rownames(getHVGs(data=normalized[,which(batch=="AP3")]))[1:3000]
+
+HVGs<-intersect(HVGsB1, HVGsB2)
+HVGs<-intersect(HVGs, HVGsB3)
+HVGs<-normalized[which(rownames(normalized) %in% HVGs),]
+
+#samples_pcomp2<-prcomp(t(log10(normalized+1)), scale=F)
+samples_pcomp2<-prcomp(t(log10(HVGs+1)), scale=F)
+
+#PCA with HVGs
+par(mfrow=c(1, 1), mar=c(4, 4, 4, 4))
+plot(samples_pcomp2$x[,1], samples_pcomp2$x[,2], xlab="PC1", ylab="PC2", col=alpha(color_selection[-which(color_selection=="black")], 0.3), pch=19)
+
+
+barplot(summary(samples_pcomp2)$importance[2,]*100, main="% variance explained per PC", ylab="")
+
+```
+
+
+**Figure 6.** Selected samples' expression PCA
+
+Then we checked that our principal components have nothing to do with quality statistics
+
+```{r PC1_QC, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow=c(3, 2), mar=c(4,4,4,2))
+
+for(i in 8:12){
+  plotXYcorrelation(x=samples_pcomp2$x[,1], y=as.numeric(stats[i,selection]), main=c(paste("PC1 vs.", rownames(stats)[i])), ylab=rownames(stats)[i], xlab="PC1", col=color_selection[-which(color_selection=="black")])
+}
+
+plotXYcorrelation(x=samples_pcomp2$x[,1], y=as.numeric(log10(stats[7, selection]+1)), main="PC1 vs. Total no. of reads (log10)", ylab="Total no. of reads (log10)", xlab="PC1", col=color_selection[-which(color_selection=="black")])
+
+```
+
+**Figure 7.** PC1 vs. quality
+
+```{r PC2_QC, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow=c(3, 2), mar=c(4,4,4,2))
+
+for(i in 8:12){
+  plotXYcorrelation(x=samples_pcomp2$x[,2], y=as.numeric(stats[i,selection]), main=c(paste("PC2 vs.", rownames(stats)[i])), ylab=rownames(stats)[i], xlab="PC2", col=color_selection[-which(color_selection=="black")])
+}
+
+plotXYcorrelation(x=samples_pcomp2$x[,2], y=as.numeric(log10(stats[7, selection]+1)), main="PC2 vs. Total no. of reads (log10)", ylab="Total no. of reads (log10)", xlab="PC2", col=color_selection[-which(color_selection=="black")])
+
+```
+
+**Figure 8.** PC2 vs. quality
+
+```{r Positions_QC, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow=c(3, 2), mar=c(4,4,4,2))
+
+for(i in 8:12){
+  plotXYcorrelation(x=sel_positions, y=as.numeric(stats[i,selection]), main=c(paste("AP position vs.", rownames(stats)[i])), ylab=rownames(stats)[i], xlab="AP position", col=color_selection[-which(color_selection=="black")])
+}
+
+plotXYcorrelation(x=sel_positions, y=as.numeric(log10(stats[7, selection]+1)), main="AP position vs. Total no. of reads (log10)", ylab="Total no. of reads (log10)", xlab="AP position", col=color_selection[-which(color_selection=="black")])
+
+```
+
+**Figure x** QC vs positions
+
+As we wanted to see if PC1 and PC2 were related with samples' position in the MOE, we plotted PC1 vs. PC2 using a color gradient to see samples' position (dorsal-ventral) in the MOE. Then we plotted each of these principal components vs our position indexes and performed Spearman correlation tests.
+
+```{r PCA_MOEpositions, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow=c(1, 1), mar=c(4, 4, 4, 2))
+
+col=colorRampPalette(c("lightblue", "darkblue"))
+plot(samples_pcomp2$x[,1], samples_pcomp2$x[,2], col=alpha(col(96)[sel_positions], 0.3), xlab="PC1", ylab="PC2", pch=19, cex=1)
+legend("bottomleft", c("Anterior", "Posterior"), pch=19, col=alpha(c("lightblue", "darkblue"), 0.3), cex=0.8)
+
+#See if PC 1 and 2 correlate with position
+
+par(mfrow=c(1, 2), mar=c(4, 4, 4, 2))
+
+plotXYcorrelation(x=samples_pcomp2$x[,1], y=sel_positions, main="PC1 vs AP position", ylab="AP position", xlab="PC1", col=color_selection[-which(color_selection=="black")])
+
+plotXYcorrelation(x=samples_pcomp2$x[,2], y=sel_positions, main="PC2 vs AP position", ylab="AP position", xlab="PC2", col=color_selection[-which(color_selection=="black")])
+```
+
+**Figure 9.** Pricipal components' and samples' positions in the MOE.
+
+```{r OSN_markers3, echo=FALSE, message=FALSE, warning=FALSE}
+colnames(normalized)<-paste(batch, sel_positions, sep="-")
+normalized<-normalized[,order(sel_positions)]
+HVGs<-HVGs[,order(sel_positions)]
+batch<-batch[order(sel_positions)]
+sel_positions<-sort(sel_positions)
+
+#marker_heat<-normalized[c("Cnga2", "Epas1", "Ric8b", "Rtp1", "Rtp2", "Cnga4", "Gap43", "Omp", "Gng13", "Gnal", "Gnb1", "Gnai2", "Gnao1", "Six1", "Alcam", "Ano2", "Adcy3", "Chl1", "Trp63", "Slc2a3", "Neurog1", "Gucy2f", "Plcb2", "Ascl1", "Trpc2", "Reep1", "Krt5", "Sema3a", "Nrp1", "Olfr1507", "Olfr449"),]
+
+#no Gucy2f
+
+marker_heat<-normalized[c("Cnga2", "Epas1", "Ric8b", "Rtp1", "Rtp2", "Cnga4", "Gap43", "Omp", "Gng13", "Gnal", "Gnb1", "Gnai2", "Gnao1", "Six1", "Alcam", "Ano2", "Adcy3", "Chl1", "Trp63", "Slc2a3", "Neurog1", "Plcb2", "Ascl1", "Trpc2", "Reep1", "Krt5", "Sema3a", "Nrp1", "Olfr1507", "Olfr449"),]
+
+marker_heat<-log10(marker_heat+1)
+
+heatmap.2(as.matrix(marker_heat), xlab="Position AP", trace='none', key.title=NA, key.ylab=NA, col=viridis(100), cexRow = 0.8, key.xlab = "log10geneExp", Colv=F)
+
+```
+
+**Figure 2.** Some neuronal markers heatmap
+
+```{r OSN_markers2, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow=c(2, 2))
+plotGenesInEachBatch(data=log10(normalized+1), genes=c("Cnga2", "Epas1", "Ric8b", "Rtp1", "Rtp2", "Cnga4", "Gap43", "Omp", "Gng13", "Gnal", "Gnb1", "Gnai2", "Gnao1", "Six1", "Alcam", "Ano2", "Adcy3", "Chl1", "Trp63", "Slc2a3", "Neurog1", "Plcb2", "Ascl1", "Trpc2", "Reep1", "Krt5", "Sema3a", "Nrp1", "Olfr1507", "Olfr449"), x=sel_positions, batches=c("AP1", "AP2", "AP3"), batchColors=c("red", "blue", "green"), xlab="position AP", ylab="log10 rpm expression", ylim=c(0, max(log10(normalized+1))))
+
+par(mfrow=c(2, 2))
+plotGenesInEachBatch(data=log10(normalized+1), genes=c("Acsm4", "Ncam2", "Nqo1"), x=sel_positions, batches=c("AP1", "AP2", "AP3"), batchColors=c("red", "blue", "green"), xlab="position AP", ylab="log10 rpm expression", ylim=c(0, max(log10(normalized+1))))
+```
+
+**Figure 3.** Some neuronal markers
+
+```{r extraDEGs, echo=FALSE, message=FALSE, warning=FALSE}
+APextraDEGs<-read.csv("./3D/APextraDEGs.csv")
+APextraDEGs<-APextraDEGs$x
+
+par(mfrow=c(2, 2))
+plotGenesInEachBatch(data=log10(normalized+1), genes=APextraDEGs[1:20], x=sel_positions, batches=c("AP1", "AP2", "AP3"), batchColors=c("red", "blue", "green"), xlab="position AP", ylab="log10 rpm expression", ylim=c(0, max(log10(normalized+1))))
+```
+
+**Some AP extra DEGs before aligning reps**
+
+```{r HVGs, echo=FALSE, message=FALSE, warning=FALSE}
+#HVGs<-log10(getHVGs(normalized)[1:1000,]+1)
+HVGs<-log10(HVGs+1)
+
+heatmap.2(HVGs, xlab="Position AP", trace='none', key.title=NA, key.ylab=NA, col=viridis(100), cexRow = 0.8, key.xlab = "log10geneExp", Colv = F)
+```
+
+**HVGs exp after rpm norm**
+
+```{r HVGsSamplesCorrelation, echo=FALSE, message=FALSE, warning=FALSE}
+cor_HVGs<-cor(HVGs, method="spearman")
+
+#heatmap.2(cor_HVGs, Colv = NA, Rowv=NA, trace='none', key.xlab="Cor.coefficient", key.ylab=NA, col=viridis_pal(), cexRow = 0.5, cexCol = 0.5, breaks=seq(0,1,0.1))
+
+```
+
+**Figure 27.** Correlation between samples using Highly Variable Genes (HVGs) 
+
+
+For aligning positions between different replicates, I'm performing correlations between expression of HVGs in the shortest replicate and in windows of 78 positions in the other 2 datasets. I select the window of 78 positions that gives the highest sum of correlation coefficients.
+
+```{r SelectPositions2align, echo=FALSE, message=FALSE, warning=FALSE}
+#HVGs from shortest batch
+#HVGs<-log10(getHVGs(normalized[,grep("AP3", colnames(normalized))])[1:1000,]+1)
+normHVGs<-normalized[rownames(HVGs),]
+#locfit(norm_degs[,gene]~lp(norm_degs[,1], deg = 2, nn=1), data=norm_degs)
+
+tmp3<-batchSubset(data=normHVGs, batch="AP3", positions=sel_positions)
+tmp2<-batchSubset(data=normHVGs, batch="AP2", positions=sel_positions)
+tmp1<-batchSubset(data=normHVGs, batch="AP1", positions=sel_positions)
+
+#tmp2=shortest dataset
+findEqPositions(tmp3, tmp2)[[1]]
+boxplot(findEqPositions(tmp3, tmp2)[[3]][,-1], main = "coefficients distribution b2")
+#abline(h=mean(findEqPositions(tmp3, tmp2)[[2]]), col="red")
+findEqPositions(tmp3, tmp1)[[1]]
+boxplot(findEqPositions(tmp3, tmp1)[[3]][,-1], main = "coefficients distribution b1")
+#abline(h=mean(findEqPositions(tmp3, tmp1)[[2]]), col="red")
+```
+**Figure 28.** Distributions of correlation coefficients of HVGs between all possible ranges of slices from batch2 and batch3 and all possible ranges of slices from batch1 and batch3 
+
+```{r AlignPositions, echo=FALSE, message=FALSE, warning=FALSE}
+normalized<-rbind(normalized, sel_positions)
+#norm1<-normalized
+
+normalized<-cbind(normalized[,colnames(normalized) %in% paste("AP1", findEqPositions(tmp3, tmp1)[[1]][1]:findEqPositions(tmp3, tmp1)[[1]][2], sep="-")], normalized[,colnames(normalized) %in% paste("AP2", findEqPositions(tmp3, tmp2)[[1]][1]:findEqPositions(tmp3, tmp2)[[1]][2], sep="-")], normalized[,colnames(normalized) %in% paste("AP3", 1:78, sep="-")])
+
+#order normalized by position
+
+normalized["sel_positions",]<-c(as.numeric(gsub("AP1-", "", colnames(normalized)[grep("AP1", colnames(normalized))]))-(findEqPositions(tmp3, tmp1)[[1]][1]-1), as.numeric(gsub("AP2-", "", colnames(normalized)[grep("AP2", colnames(normalized))]))-(findEqPositions(tmp3, tmp2)[[1]][1]-1), as.numeric(gsub("AP3-", "", colnames(normalized)[grep("AP3", colnames(normalized))])))
+
+normalized<-normalized[,order(normalized["sel_positions",])]
+```
+
+```{r batchCorrection, echo=FALSE, message=FALSE, warning=FALSE}
+#We'll first get 3 values per gene which will be its average expression across all positions in each batch. Then we'll average these 3 values to get a concensus average expression per gene (Ag). To correct batch effect, the rpm counts of each gene in each position in each batch will be multiplied by Ag, then divided the average expression for that gene across positions in the corresponding batch.
+
+batch<-rep("AP1", dim(normalized)[2])
+batch[grep("AP2", colnames(normalized))]<-"AP2"
+batch[grep("AP3", colnames(normalized))]<-"AP3"
+
+batch_col<-rep("red", length(batch))
+batch_col[which(batch=="AP2")]<-"blue"
+batch_col[which(batch=="AP3")]<-"green"
+
+AvPerGene<-t(apply(normalized[-dim(normalized)[1],], 1, function(i){tapply(i, batch, mean)}))
+
+normalized[-dim(normalized)[1],which(batch=="AP1")]<-apply(normalized[-dim(normalized)[1],which(batch=="AP1")], 2, function(x){x*rowMeans(AvPerGene)/AvPerGene[,"AP1"]})
+normalized[-dim(normalized)[1],which(batch=="AP2")]<-apply(normalized[-dim(normalized)[1],which(batch=="AP2")], 2, function(x){x*rowMeans(AvPerGene)/AvPerGene[,"AP2"]})
+normalized[-dim(normalized)[1],which(batch=="AP3")]<-apply(normalized[-dim(normalized)[1],which(batch=="AP3")], 2, function(x){x*rowMeans(AvPerGene)/AvPerGene[,"AP3"]})
+
+#Eliminate genes with 0 values in one of the replicates
+normalized<-normalized[-which(is.na(rowSums(normalized))),]
+
+#PCA
+#HVGs<-log10(getHVGs(normalized[-which(rownames(normalized)=="sel_positions"),])[1:1000,]+1)
+HVGs<-log10(getHVGs(normalized[-which(rownames(normalized)=="sel_positions"),])[1:1000,]+1)
+samples_pcomp2<-prcomp(t(log10(HVGs+1)), scale=F)
+
+#PCA with HVGs
+par(mfrow=c(1, 1), mar=c(4, 4, 4, 4))
+plot(samples_pcomp2$x[,1], samples_pcomp2$x[,2], xlab="PC1", ylab="PC2", col=alpha(batch_col, 0.3), pch=19)
+
+
+barplot(summary(samples_pcomp2)$importance[2,]*100, main="% variance explained per PC", ylab="")
+
+par(mfrow=c(1, 1), mar=c(4, 4, 4, 2))
+
+col=colorRampPalette(c("lightblue", "darkblue"))
+plot(samples_pcomp2$x[,1], samples_pcomp2$x[,2], col=alpha(col(96)[sel_positions], 0.3), xlab="PC1", ylab="PC2", pch=19, cex=1)
+legend("bottomleft", c("Anterior", "Posterior"), pch=19, col=alpha(c("lightblue", "darkblue"), 0.3), cex=0.8)
+
+#See if PC 1 and 2 correlate with position
+
+par(mfrow=c(1, 2), mar=c(4, 4, 4, 2))
+
+plotXYcorrelation(x=samples_pcomp2$x[,1], y=normalized["sel_positions",], main="PC1 vs AP position", ylab="AP position", xlab="PC1", col=batch_col)
+
+plotXYcorrelation(x=samples_pcomp2$x[,2], y=normalized["sel_positions",], main="PC2 vs AP position", ylab="AP position", xlab="PC2", col=batch_col)
+```
+
+**PCA having aligned samples and corrected batch effect**
+
+
+```{r OSN_markers43hk, echo=FALSE, message=FALSE, warning=FALSE}
+#Some plots
+
+par(mfrow=c(2, 2))
+
+plotGenesInEachBatch(data=log10(normalized+1), genes=c("Cnga2", "Epas1", "Ric8b", "Rtp1", "Rtp2", "Cnga4", "Gap43", "Omp", "Gng13", "Gnal", "Gnb1", "Gnai2", "Gnao1", "Six1", "Alcam", "Ano2", "Adcy3", "Chl1", "Trp63", "Slc2a3", "Neurog1", "Plcb2", "Ascl1", "Trpc2", "Reep1", "Krt5", "Sema3a", "Nrp1", "Olfr1507", "Olfr449"), x=normalized["sel_positions",], batches=c("AP1", "AP2", "AP3"), batchColors=c("red", "blue", "green"), xlab="position AP", ylab="log10 rpm expression", ylim=c(0, max(log10(normalized+1))))
+
+par(mfrow=c(2, 2))
+
+plotGenesInEachBatch(data=log10(normalized+1), genes=c("Acsm4", "Ncam2", "Nqo1"), x=normalized["sel_positions",], batches=c("AP1", "AP2", "AP3"), batchColors=c("red", "blue", "green"), xlab="position AP", ylab="log10 rpm expression", ylim=c(0, max(log10(normalized+1))))
+
+#PC1 biggest loadings
+par(mfrow=c(2, 2))
+
+plotGenesInEachBatch(data=log10(normalized+1), genes=rownames(samples_pcomp2$rotation[order(-abs(samples_pcomp2$rotation[,1])),])[1:10], x=normalized["sel_positions",], batches=c("AP1", "AP2", "AP3"), batchColors=c("red", "blue", "green"), xlab="position AP", ylab="log10 rpm expression", ylim=c(0, max(log10(normalized+1))))
+
+```
+
+**Plots of markers and PC1 biggest loadings having aligned samples and corrected batch effect **
+
+```{r extraDEGs2, echo=FALSE, message=FALSE, warning=FALSE}
+#par(mfrow=c(2, 2))
+#plotGenesInEachBatch(data=log10(normalized+1), genes=APextraDEGs[1:20], x=normalized["sel_positions",], batches=c("AP1", "AP2", "AP3"), batchColors=c("red", "blue", "green"), xlab="position AP", ylab="log10 rpm expression", ylim=c(0, max(log10(normalized+1))))
+
+logNormExtraDEGs<-log10(normalized[APextraDEGs,]+1)
+logNormExtraDEGs<-t(rbind(normalized["sel_positions",], logNormExtraDEGs))
+colnames(logNormExtraDEGs)[1]<-"position"
+
+###### Analysis continues using normalized between 0 and 1 fitted(with predicted values if necessary) log10 rpm normalized data #####
+
+dat<-matrix(0, nrow = length(APextraDEGs), ncol=(78*3))
+column=78
+for(b in unique(batch)){
+  fitted_data<-apply(logNormExtraDEGs[grep(b, rownames(logNormExtraDEGs)),-1], 2, function(x){locfit(x~lp(as.numeric(logNormExtraDEGs[grep(b, rownames(logNormExtraDEGs)),1]), deg = 2, nn=1))})
+  fittedExtraDEGs<-fitted_data
+  fittedExtraDEGs<-sapply(1:length(fittedExtraDEGs), function(x){predict(fittedExtraDEGs[[x]],  c(1:max(logNormExtraDEGs[,1])))})
+  colnames(fittedExtraDEGs)<-names(fitted_data)
+  fittedExtraDEGs<-t(fittedExtraDEGs)
+  fittedExtraDEGs<-t(apply(fittedExtraDEGs, 1, normBetween0and1))
+  dat[,(column-77):column]<-fittedExtraDEGs
+  column=column+78
+}
+colnames(dat)<-c(paste("AP1-", 1:78, sep=""), paste("AP2-", 1:78, sep=""), paste("AP3-", 1:78, sep=""))
+
+count=1
+for(b in unique(batch)){
+  plot(0, 0, xlim=c(0, max(logNormExtraDEGs[,1])), ylim=c(0, 1))
+  apply(dat[,grep(b, colnames(dat))], 1, function(x){lines(1:max(logNormExtraDEGs[,1]), x, col=count)})
+  count=count+1
+}
+rm(count)
+
+count=1
+for(b in unique(batch)){
+  plot(0, 0, xlim=c(0, 60), ylim=c(0, 1))
+  apply(dat[,grep(b, colnames(dat))], 1, function(x){lines(1:60, x[1:60], col=count)})
+  count=count+1
+}
+rm(count)
+```
+
+**Some AP extra DEGs AFTER aligning reps**
+
+```{r OSN_markers43, echo=FALSE, message=FALSE, warning=FALSE}
+marker_heat<-normalized[c("Cnga2", "Epas1", "Ric8b", "Rtp1", "Rtp2", "Cnga4", "Gap43", "Omp", "Gng13", "Gnal", "Gnb1", "Gnai2", "Gnao1", "Six1", "Alcam", "Ano2", "Adcy3", "Chl1", "Trp63", "Slc2a3", "Neurog1", "Plcb2", "Ascl1", "Trpc2", "Reep1", "Krt5", "Sema3a", "Nrp1", "Olfr1507", "Olfr449"),]
+
+marker_heat<-log10(marker_heat+1)
+#marker_heat[marker_heat==-Inf]=0
+
+#position<-colnames(expr)
+#position<-gsub("_", "", position)
+
+#position<-as.numeric(gsub("AP..", "", position))
+
+heatmap.2(as.matrix(marker_heat), xlab="Position AP", trace='none', key.title=NA, key.ylab=NA, col=viridis(100), cexRow = 0.8, key.xlab = "log10geneExp", Colv = F)
+
+```
+
+**Heatmap of markers having aligned the samples**
+
+```{r HVGsSamplesCorrelation3, echo=FALSE, message=FALSE, warning=FALSE}
+#HVGs<-log10(getHVGs(normalized[-which(rownames(normalized)=="sel_positions"),])[1:1000,]+1)
+HVGs<-log10(getHVGs(normalized[-which(rownames(normalized)=="sel_positions"),])[1:1000,]+1)
+
+write.csv(rbind(HVGs, sel_positions=normalized["sel_positions",]), "./supp_tables/APlog10HVGs.csv")
+
+heatmap.2(HVGs, xlab="Position AP", trace='none', key.title=NA, key.ylab=NA, col=viridis(100), cexRow = 0.8, key.xlab = "log10geneExp", Colv = F)
+
+
+cor_HVGs<-cor(HVGs, method="spearman")
+#rownames(cor_HVGs)<-gsub("\\..+", "", rownames(cor_HVGs))
+#colnames(cor_HVGs)<-gsub("\\..+", "", colnames(cor_HVGs))
+#heatmap.2(as.matrix(marker_heat), xlab="Position P-A", trace='none', key.title=NA, key.ylab=NA, col=viridis(100), cexRow = 0.8, key.xlab = "log10geneExp", Colv = F)
+
+#pdf(file = "./figures_pdf2/Fig1B_AP.pdf", width=5, height = 5)
+heatmap.2(cor_HVGs, Colv = NA, Rowv=NA, trace='none', key.title=NA, key.ylab=NA, key.xlab="Cor.coefficient", breaks=seq(0,1,0.1), col=viridis_pal(), cexRow = 0.5, cexCol = 0.5)
+#dev.off()
+
+cor_list<-list()
+for(i in unique(normalized["sel_positions",])){
+  tmp<-cor_HVGs[which(normalized["sel_positions",]==i), which(normalized["sel_positions",]==i)]
+  tmp<-tmp[-which(tmp==1)]
+  tmp<-unique(tmp)
+  cor_list[[i]]<-tmp
+}
+
+plotJitter<-function(x, y, xlabels, col, xlab, ylab, ylim){
+  #x=values in x axis, y=values in y axis, slabels=labels for each element in x axis, col=color per dot, xlab and ylab =label for x and y axes
+  plot(y ~ jitter(x, 1), pch = 19, axes=FALSE, col=alpha(col, 0.3), xlab=xlab, ylab=ylab, ylim=ylim)
+  axis(1, at=xlabels, labels=xlabels)
+  axis(2)
+}
+
+cor_listV<-numeric()
+for(i in 1:length(cor_list)){
+  cor_listV<-c(cor_listV, as.numeric(cor_list[[i]]))
+}
+
+jitterPos<-numeric()
+for(i in 1:length(cor_list)){
+  jitterPos<-c(jitterPos, rep(i, length(cor_list[[i]])))
+}
+
+pdf(file = "./figures_pdf2/Fig1B_alt_AP.pdf", width=5, height = 5)
+boxplot(unlist(cor_list), ylab="rho", xlab="AP axis", ylim=c(0, 1))
+boxplot(cor_list, ylab="rho", xlab="AP position", ylim=c(0, 1), cex.lab=0.6, cex.axis=0.6)
+plotJitter(x=jitterPos, y=cor_listV, xlabels=1:length(cor_list), col=1, xlab="position", ylab="coefficient", ylim=c(0, 1))
+dev.off()
+
+```
+
+**Figure 27.** Correlation between aligned samples using Highly Variable Genes (HVGs) 
+
+##Detected genes per position
+
+```{r MeanExpression2, echo=FALSE, message=FALSE, warning=FALSE}
+plotMeanDetectedGenesPerPosition(data=normalized[-which(rownames(normalized)=="sel_positions"),], thresh=10, positions=normalized["sel_positions",], errorBars="SDV", xlab="position AP")
+
+normORs<-rbind(normalized[grep("Olfr", rownames(normalized)),], sel_positions=normalized["sel_positions",])
+plotMeanDetectedGenesPerPosition(data=normORs[-which(rownames(normORs)=="sel_positions"),], thresh=10, positions=normORs["sel_positions",], errorBars="SDV", xlab="position AP")
+rm(normORs)
+```
+**Mean detected genes per position** (error bars = SDV)
+
+##Average replicates
+
+```{r MeanExpression, echo=FALSE, message=FALSE, warning=FALSE}
+normalized<-t(apply(normalized, 1, function(i){tapply(i, normalized[dim(normalized)[1],], mean)}))
+
+write.csv(normalized, "./newAPnormalized_rpm_repsAvg_G99.csv")
+
+#Use only first 60 slices (dont think so)
+
+normalized<-normalized[,19:78]
+colnames(normalized)<-c(1:60)
+write.csv(normalized, "./newAPnormalized_rpm_repsAvg_60s_G99.csv")
+
+```
+
+
+
+```{r OSN_markersfg5, echo=FALSE, message=FALSE, warning=FALSE}
+agGenes<-read.csv("./supp_tables/ag_genes4deconv_T2.csv")
+pdf(file = "./figures_pdf2/Fig1E_AP_agOlfrs_rev.pdf", width=5, height = 5)
+par(mfrow=c(2, 2))
+for(marker in agGenes$genes[grep("Olfr", agGenes$genes)][agGenes$genes[grep("Olfr", agGenes$genes)] %in% rownames(normalized)]){
+  #plot(1:78, normalized[marker,], xlim=c(0, 80), main=marker, xlab="position P-A", ylab="rpm expression")
+  plot(1:dim(normalized)[2], normalized[marker,], xlim=c(0, dim(normalized)[2]+1), main=marker, xlab="position AP", ylab="mean rpm expression", pch=19, ylim=c(0, max(normalized[marker,])+1))
+  lines(locfit(normalized[marker,]~lp(1:dim(normalized)[2], deg = 2, nn=1), data=as.data.frame(normalized)), col="red")
+}
+dev.off()
+
+par(mfrow=c(2, 2))
+for(marker in c("Cnga2", "Epas1", "Ric8b", "Rtp1", "Rtp2", "Cnga4", "Gap43", "Omp", "Gng13", "Gnal", "Gnb1", "Gnai2", "Gnao1", "Six1", "Alcam", "Ano2", "Adcy3", "Chl1", "Trp63", "Slc2a3", "Neurog1", "Plcb2", "Ascl1", "Trpc2", "Reep1", "Krt5", "Sema3a", "Nrp1", "Olfr1507", "Olfr449")){
+  #plot(1:78, normalized[marker,], xlim=c(0, 80), main=marker, xlab="position P-A", ylab="rpm expression")
+  plot(1:dim(normalized)[2], log10(normalized[marker,]+1), xlim=c(0, dim(normalized)[2]+1), main=marker, xlab="position AP", ylab="log10 mean rpm expression", pch=19, ylim=c(0, max(log10(normalized+1))))
+}
+
+par(mfrow=c(2, 2))
+for(marker in c("Acsm4", "Ncam2", "Nqo1")){
+  #plot(1:78, normalized[marker,], xlim=c(0, 80), main=marker, xlab="position P-A", ylab="rpm expression")
+  plot(1:dim(normalized)[2], log10(normalized[marker,]+1), xlim=c(0, dim(normalized)[2]+1), main=marker, xlab="position AP", ylab="log10 mean rpm expression", pch=19, ylim=c(0, max(log10(normalized+1))))
+}
+
+pdf(file = "./figures_pdf2/Fig1E_AP.pdf", width=5, height = 5)
+par(mfrow=c(2, 2))
+for(marker in c("Acsm4", "Ncam2", "Nqo1", "Reg3g", "Olfr878", "Olfr855", "Olfr449", "Olfr1310", "Olfr1277", "Nrp2")){
+  #plot(1:78, normalized[marker,], xlim=c(0, 80), main=marker, xlab="position P-A", ylab="rpm expression")
+  plot(1:dim(normalized)[2], normalized[marker,], xlim=c(0, dim(normalized)[2]+1), main=marker, xlab="position AP", ylab="mean rpm expression", pch=19, ylim=c(0, max(normalized[marker,])+1))
+  lines(locfit(normalized[marker,]~lp(1:dim(normalized)[2], deg = 2, nn=1), data=as.data.frame(normalized)), col="red")
+}
+dev.off()
+
+pdf(file = "./figures_pdf2/Fig1E_AP_QCcheck_T3_rev.pdf", width=5, height = 5)
+par(mfrow=c(2, 2))
+for(marker in c("Cnga2", "Omp", "Gnal")){
+  plot(1:dim(normalized)[2], normalized[marker,], xlim=c(0, dim(normalized)[2]+1), main=marker, xlab="position AP", ylab="mean rpm expression", pch=19, ylim=c(0, max(normalized[marker,])+1))
+  lines(locfit(normalized[marker,]~lp(1:dim(normalized)[2], deg = 2, nn=1), data=as.data.frame(normalized)), col="red")
+  
+  plotXYcorrelation(x=cellPropsNusvr[,"OSN"], y=log10(normalized[marker,]+1), main=c(paste("OSN proportions vs.", marker)), ylab=marker, xlab="OSN proportions", col=1)
+}
+dev.off()
+
+pdf(file = "./figures_pdf2/Fig1E_AP_rev.pdf", width=5, height = 5)
+par(mfrow=c(2, 2))
+for(marker in c("Cnga2", "Cyp26b1", "Dlg2", "Epha5", "Etv5", "Fos", "Gpr158", "Kirrel2", "Lrrc3b", "Nphs1", "Nrp1", "Nxph3", "Pcdh10", "Pcp4l1", "Plxna3", "Ptchd1", "Ptprn", "Rasgrp4", "S100a5", "Sema3e", "Sema7a", "Slc8a1", "Slc17a6", "Snca", "Syt4")){
+  #plot(1:78, normalized[marker,], xlim=c(0, 80), main=marker, xlab="position P-A", ylab="rpm expression")
+  plot(1:dim(normalized)[2], normalized[marker,], xlim=c(0, dim(normalized)[2]+1), main=marker, xlab="position AP", ylab="mean rpm expression", pch=19, ylim=c(0, max(normalized[marker,])+1))
+  lines(locfit(normalized[marker,]~lp(1:dim(normalized)[2], deg = 2, nn=1), data=as.data.frame(normalized)), col="red")
+}
+
+par(mfrow=c(2, 2))
+for(marker in c("Bace1", "Calb2", "Cdh15", "Chil3", "Efna5", "Entpd2", "Etv3", "Kirrel3", "Ppp3ca", "Rims3")){
+  #plot(1:78, normalized[marker,], xlim=c(0, 80), main=marker, xlab="position P-A", ylab="rpm expression")
+  plot(1:dim(normalized)[2], normalized[marker,], xlim=c(0, dim(normalized)[2]+1), main=marker, xlab="position AP", ylab="mean rpm expression", pch=19, ylim=c(0, max(normalized[marker,])+1))
+  lines(locfit(normalized[marker,]~lp(1:dim(normalized)[2], deg = 2, nn=1), data=as.data.frame(normalized)), col="red")
+}
+dev.off()
+
+logNormNeuroMks<-log10(normalized[c("Cnga2", "Cyp26b1", "Dlg2", "Epha5", "Etv5", "Fos", "Gpr158", "Kirrel2", "Lrrc3b", "Nphs1", "Nrp1", "Nxph3", "Pcdh10", "Pcp4l1", "Plxna3", "Ptchd1", "Ptprn", "Rasgrp4", "S100a5", "Sema3e", "Sema7a", "Slc8a1", "Slc17a6", "Snca", "Syt4", "Bace1", "Calb2", "Cdh15", "Chil3", "Efna5", "Entpd2", "Etv3", "Kirrel3", "Ppp3ca", "Rims3"),]+1)
+
+heatNeuroMks<-t(apply(logNormNeuroMks, 1, normBetween0and1))
+pdf(file = "./figures_pdf2/NeuroMksHM_AP_rev.pdf", width=7, height = 7)
+heatmap.2(as.matrix(heatNeuroMks), Colv = NA, xlab="Position AP", trace='none', key.xlab="log10meanRPMnorm", key.ylab=NA, key.title=NA, col=viridis(100), cexRow = 0.8, cexCol = 0.8)
+dev.off()
+
+write.csv(normalized[c("Acsm4", "Ncam2", "Nqo1", "Reg3g"),], "./supp_tables/spatialMarkersAP.csv")
+
+cairo_ps("./figures_pdf2/Fig1E_AP.eps", width = 5, height = 5)
+par(mfrow=c(2, 2))
+for(marker in c("Acsm4", "Ncam2", "Nqo1")){
+  #plot(1:78, normalized[marker,], xlim=c(0, 80), main=marker, xlab="position P-A", ylab="rpm expression")
+  plot(1:dim(normalized)[2], normalized[marker,], xlim=c(0, dim(normalized)[2]+1), main=marker, xlab="position AP", ylab="mean rpm expression", pch=19, ylim=c(0, max(normalized[marker,])+1))
+  lines(locfit(normalized[marker,]~lp(1:dim(normalized)[2], deg = 2, nn=1), data=as.data.frame(normalized)), col="red")
+}
+dev.off()
+
+HVGsAvgs<-getHVGs(data=normalized)[1:1000,]
+
+cor_HVGsAvgs<-cor(HVGsAvgs, method="spearman")
+
+pdf(file = "./figures_pdf2/Fig1B_AP.pdf", width=5, height = 5)
+heatmap.2(cor_HVGsAvgs, Colv = NA, Rowv=NA, trace='none', key.title=NA, key.ylab=NA, key.xlab="Cor.coefficient", breaks=seq(0,1,0.1), col=viridis_pal(), cexRow = 0.5, cexCol = 0.5)
+dev.off()
+```
+
+**Plots of genes having averaged replicates**
+
+```{r}
+mOSNpropsNusvr<-read.csv("./supp_tables/AP_mOSNproportions_NuSVR.csv")
+mOSNpropsNnls<-read.csv("./supp_tables/AP_mOSNproportions_nnls.csv")
+
+pdf(file = "./figures_pdf2/Fig3A_AP.pdf", width=5, height = 5)
+par(mfrow=c(2, 2))
+for(cell in c("mOSNs", "others")){
+  #plot(1:78, normalized[marker,], xlim=c(0, 80), main=marker, xlab="position P-A", ylab="rpm expression")
+  plot(mOSNpropsNusvr$X+1, mOSNpropsNusvr[,cell], xlim=c(0, length(mOSNpropsNusvr$X)+1), main=paste("NuSVR", cell), xlab="position AP", ylab="proportion", pch=19, ylim=c(0, 1))
+  lines(locfit(mOSNpropsNusvr[,cell]~lp(mOSNpropsNusvr$X+1, deg = 2, nn=1), data=as.data.frame(mOSNpropsNusvr)), col="red")
+  
+  plot(mOSNpropsNnls$X+1, mOSNpropsNnls[,cell], xlim=c(0, length(mOSNpropsNnls$X)+1), main=paste("nnls", cell), xlab="position AP", ylab="proportion", pch=19, ylim=c(0, 1))
+  lines(locfit(mOSNpropsNnls[,cell]~lp(mOSNpropsNnls$X+1, deg = 2, nn=1), data=as.data.frame(mOSNpropsNnls)), col="red")
+}
+dev.off()
+
+```
+
+```{r}
+mOSNpropsNusvr<-read.csv("./supp_tables/AP_NeuronsProportions_NuSVR.csv")
+mOSNpropsNnls<-read.csv("./supp_tables/AP_NeuronsProportions_nnls.csv")
+
+pdf(file = "./figures_pdf2/Fig3A.2_AP.pdf", width=5, height = 5)
+par(mfrow=c(2, 2))
+for(cell in c("neurons", "otherCells")){
+  #plot(1:78, normalized[marker,], xlim=c(0, 80), main=marker, xlab="position P-A", ylab="rpm expression")
+  plot(mOSNpropsNusvr$X+1, mOSNpropsNusvr[,cell], xlim=c(0, length(mOSNpropsNusvr$X)+1), main=paste("NuSVR", cell), xlab="position AP", ylab="proportion", pch=19, ylim=c(0, 1), col=alpha(1, 0.3))
+  lines(locfit(mOSNpropsNusvr[,cell]~lp(mOSNpropsNusvr$X+1, deg = 2, nn=1), data=as.data.frame(mOSNpropsNusvr)), col="red")
+  
+  plot(mOSNpropsNnls$X+1, mOSNpropsNnls[,cell], xlim=c(0, length(mOSNpropsNnls$X)+1), main=paste("nnls", cell), xlab="position AP", ylab="proportion", pch=19, ylim=c(0, 1), col=alpha(1, 0.3))
+  lines(locfit(mOSNpropsNnls[,cell]~lp(mOSNpropsNnls$X+1, deg = 2, nn=1), data=as.data.frame(mOSNpropsNnls)), col="red")
+}
+dev.off()
+
+autocorrelationTest(filter = c(1, 1), data=t(mOSNpropsNnls[,-1]), maxLag = dim(mOSNpropsNnls)[1]-10)
+
+autocorrelationTest(filter = c(1, 1), data=t(mOSNpropsNusvr[,-1]), maxLag = dim(mOSNpropsNusvr)[1]-10)
+```
+
+**mOSN props along axis**
+
+```{r corona_markersfg5, echo=FALSE, message=FALSE, warning=FALSE}
+#genes from https://www.biorxiv.org/content/biorxiv/early/2020/03/28/2020.03.25.009084.full.pdf
+
+par(mfrow=c(2, 2))
+for(marker in c("Ace2", "Tmprss2", "Ctsb", "Dpp4", "Anpep", "Furin", "St6gal1", "St3gal4")){
+  plot(1:dim(normalized)[2], log10(normalized[marker,]+1), xlim=c(0, dim(normalized)[2]+1), main=marker, xlab="position AP", ylab="log10 mean rpm expression", pch=19, ylim=c(0, max(log10(normalized+1))))
+}
+```
+
+**Plots of corona related genes having averaged replicates**
+
+```{r otherCells_markersfg5, echo=FALSE, message=FALSE, warning=FALSE}
+geneList<-read.csv("supp_tables/mostSpecificGenePerCellType.csv", stringsAsFactors = F)
+colnames(geneList)<-c("cellType", "gene")
+pdf(file = "./figures_pdf2/Fig3B_AP.pdf", width=5, height = 5)
+par(mfrow=c(2, 2))
+for(marker in geneList$gene){
+  #plot(1:dim(normalized)[2], log10(normalized[marker,]+1), xlim=c(0, dim(normalized)[2]+1), main=paste(marker, geneList$cellType[which(geneList$gene==marker)]), xlab="position AP", ylab="log10 mean rpm expression", pch=19, ylim=c(0, max(log10(normalized[geneList$gene,]+1))))
+  plot(1:dim(normalized)[2], normalized[marker,], xlim=c(0, dim(normalized)[2]+1), main=paste(marker, geneList$cellType[which(geneList$gene==marker)]), xlab="position AP", ylab="log10 mean rpm expression", pch=19)
+  lines(locfit(normalized[marker,]~lp(1:dim(normalized)[2], deg = 2, nn=1), data=as.data.frame(normalized)), col="red")
+}
+dev.off()
+
+write.csv(normalized[c("Fgf20", "Wfdc18", "Rps21"),], "./supp_tables/someGenesFromOtherCells_AP.csv")
+
+
+cairo_ps("./figures_pdf2/Fig3B_AP.eps", width = 5, height = 5)
+par(mfrow=c(2, 2))
+for(marker in geneList$gene){
+  #plot(1:dim(normalized)[2], log10(normalized[marker,]+1), xlim=c(0, dim(normalized)[2]+1), main=paste(marker, geneList$cellType[which(geneList$gene==marker)]), xlab="position AP", ylab="log10 mean rpm expression", pch=19, ylim=c(0, max(log10(normalized[geneList$gene,]+1))))
+  plot(1:dim(normalized)[2], normalized[marker,], xlim=c(0, dim(normalized)[2]+1), main=paste(marker, geneList$cellType[which(geneList$gene==marker)]), xlab="position AP", ylab="log10 mean rpm expression", pch=19)
+  lines(locfit(normalized[marker,]~lp(1:dim(normalized)[2], deg = 2, nn=1), data=as.data.frame(normalized)), col="red")
+}
+dev.off()
+```
+
+**Plots of genes from other cell types**
+
+```{r OSN_markers4, echo=FALSE, message=FALSE, warning=FALSE}
+
+marker_heat<-normalized[c("Omp", "Cnga4", "Gnal"),]
+
+marker_heat<-log10(marker_heat+1)
+
+pdf(file = "./figures_pdf2/FigS1E_AP_alt.pdf", width=5, height = 5)
+heatmap.2(as.matrix(marker_heat), xlab="", trace='none', key.title=NA, key.ylab=NA, col=viridis(length(seq(0,6,0.1))-1), cexRow = 0.8, key.xlab = "log10geneExp", labCol = FALSE, breaks=seq(0,6,0.1), Rowv=F)
+dev.off()
+
+#marker_heat<-normalized[c("Cnga2", "Epas1", "Ric8b", "Rtp1", "Rtp2", "Cnga4", "Gap43", "Omp", "Gng13", "Gnal", "Gnb1", "Gnai2", "Gnao1", "Six1", "Alcam", "Ano2", "Adcy3", "Chl1", "Trp63", "Slc2a3", "Neurog1", "Plcb2", "Ascl1", "Trpc2", "Reep1", "Krt5"),]
+marker_heat<-normalized[c("Reg3g", "Gnb1", "Omp", "Gnao1", "Cnga4", "Ano2", "Gnai2", "Gnal", "Ric8b", "Adcy3", "Cnga2", "Alcam", "Gap43", "Chl1", "Ascl1", "Neurog1", "Trp63", "Epas1", "Six1", "Slc2a3"),]
+
+marker_heat<-log10(marker_heat+1)
+
+pdf(file = "./figures_pdf2/Fig1D_AP.pdf", width=5, height = 5)
+heatmap.2(as.matrix(marker_heat), xlab="Position AP", trace='none', key.title=NA, key.ylab=NA, col=viridis(100), cexRow = 0.8, cexCol=0.5, key.xlab = "log10meanRPM", Colv = F, Rowv=F)
+dev.off()
+
+write.csv(marker_heat, "./supp_tables/log10MOEMarkersAP.csv")
+
+```
+
+**Heatmap of genes having averaged replicates**
+
+```{r normByMks, echo=FALSE, message=FALSE, warning=FALSE}
+#Apply second norm just to Olfrs
+
+norm_complete<-normalized[-which(rownames(normalized)=="sel_positions"),]
+
+normalized<-normalizeByMarkersGeoMean(data=normalized, markers=c("Omp", "Cnga2", "Gnal"))
+
+normalized<-normalized[grep("Olfr", rownames(normalized)),]
+
+write.csv(normalized, "./supp_tables/newAP_ORS_normalized_rpm_repsAvg_mks_G99.csv")
+```
+
+
+```{r OSN_markers5, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow=c(2, 2))
+for(marker in c("Olfr878", "Olfr1395", "Olfr449", "Olfr2", "Olfr1507")){
+  plot(1:dim(normalized)[2], log10(normalized[marker,]+1), xlim=c(0, dim(normalized)[2]+1), main=marker, xlab="position AP", ylab="log10 mean rpm expression", pch=19, ylim=c(0, max(log10(normalized+1))))
+}
+```
+
+**ORs defining zones after 2nd norm** (changed Olfr247 x Olfr878)
+
+```{r OSN_markers6, echo=FALSE, message=FALSE, warning=FALSE}
+
+normCanonMks<-normalizeByMarkersGeoMean(data=norm_complete[c("Acsm4", "Ncam2", "Nqo1", "Omp", "Cnga2", "Gnal"),], markers=c("Omp", "Cnga2", "Gnal"))
+
+par(mfrow=c(2, 2))
+for(marker in c("Acsm4", "Ncam2", "Nqo1")){
+  plot(1:dim(normCanonMks)[2], log10(normCanonMks[marker,]+1), xlim=c(0, dim(normCanonMks)[2]+1), main=marker, xlab="position AP", ylab="log10 mean rpm expression", pch=19, ylim=c(0, max(log10(normCanonMks+1))))
+}
+
+par(mfrow=c(2, 2))
+for(marker in c("Acsm4", "Ncam2", "Nqo1")){
+  plot(1:dim(normCanonMks)[2], normCanonMks[marker,], xlim=c(0, dim(normCanonMks)[2]+1), main=marker, xlab="position AP", ylab="mean rpm expression", pch=19, ylim=c(0, max(normCanonMks[marker,])+1))
+}
+```
+
+**Markers exp after 2nd norm**
+
+```{r OSN_markers4678, echo=FALSE, message=FALSE, warning=FALSE}
+#marker_heat<-normalized[c("Olfr2", "Olfr727", "Olfr449"),]
+marker_heat<-log10(normalized+1)
+
+heatmap.2(as.matrix(marker_heat), xlab="Position AP", trace='none', key.title=NA, key.ylab=NA, col=viridis(100), cexRow = 0.8, key.xlab = "log10meanRPM", Colv = F)
+
+```
+
+**Markers exp after 2nd norm**
+
+```{r ORsNotInChemS, echo=FALSE, message=FALSE, warning=FALSE}
+
+ORsNotInChemS<-read.csv("./supp_tables/DEORsNotInChemSenses.csv", stringsAsFactors = F)[,-1]
+
+par(mfrow=c(3, 3))
+for(marker in ORsNotInChemS[which(ORsNotInChemS %in% rownames(normalized))]){
+  plot(1:dim(normalized)[2], log10(normalized[marker,]+1), xlim=c(0, dim(normalized)[2]+1), main=marker, xlab="position AP", ylab="log10 mean rpm expression", pch=19, ylim=c(0, max(log10(normalized+1))))
+}
+```
+
+**DEORs not in Chem Senses**
+
+```{r PCA_avgs, echo=FALSE, message=FALSE, warning=FALSE}
+
+## Highly Variable Genes
+
+HVGsAvgs<-getHVGs(data=norm_complete)[1:1000,]
+
+#samples_pcomp2<-prcomp(t(log10(normalized+1)), scale=F)
+samples_pcompAvgs<-prcomp(t(log10(HVGsAvgs+1)), scale=F)
+
+#PCA with HVGs
+
+barplot(summary(samples_pcompAvgs)$importance[2,]*100, main="% variance explained per PC", ylab="")
+
+par(mfrow=c(1, 1), mar=c(4, 4, 4, 2))
+
+col=colorRampPalette(c("lightblue", "darkblue"))
+plot(samples_pcompAvgs$x[,1], samples_pcompAvgs$x[,2], col=alpha(col(65)[1:dim(norm_complete)[2]], 0.3), xlab="PC1", ylab="PC2", pch=19, cex=1)
+legend("bottomleft", c("Anterior", "Posterior"), pch=19, col=alpha(c("lightblue", "darkblue"), 0.3), cex=0.8)
+
+#See if PC 1 and 2 correlate with position
+
+par(mfrow=c(1, 2), mar=c(4, 4, 4, 2))
+
+plotXYcorrelation(x=samples_pcompAvgs$x[,1], y=1:dim(norm_complete)[2], main="PC1 vs AP position", ylab="AP position", xlab="PC1", col=1)
+
+plotXYcorrelation(x=samples_pcompAvgs$x[,2], y=1:dim(norm_complete)[2], main="PC2 vs AP position", ylab="AP position", xlab="PC2", col=1)
+```
+
+**Figure 9.** Pricipal components' and samples' positions in the MOE. Having averaged samples
+
+```{r PCA_avgsORsNorm, echo=FALSE, message=FALSE, warning=FALSE}
+
+normalized2<-norm_complete
+normalized2[grep("Olfr", rownames(normalized2)),]<-normalized
+
+## Highly Variable Genes
+
+HVGsAvgs<-getHVGs(data=normalized2)[1:1000,]
+
+#samples_pcomp2<-prcomp(t(log10(normalized+1)), scale=F)
+samples_pcompAvgs<-prcomp(t(log10(HVGsAvgs+1)), scale=F)
+
+#PCA with HVGs
+
+barplot(summary(samples_pcompAvgs)$importance[2,]*100, main="% variance explained per PC", ylab="")
+
+par(mfrow=c(1, 1), mar=c(4, 4, 4, 2))
+
+col=colorRampPalette(c("lightblue", "darkblue"))
+plot(samples_pcompAvgs$x[,1], samples_pcompAvgs$x[,2], col=alpha(col(65)[1:dim(normalized2)[2]], 0.3), xlab="PC1", ylab="PC2", pch=19, cex=1)
+legend("bottomleft", c("Anterior", "Posterior"), pch=19, col=alpha(c("lightblue", "darkblue"), 0.3), cex=0.8)
+
+#See if PC 1 and 2 correlate with position
+
+par(mfrow=c(1, 2), mar=c(4, 4, 4, 2))
+
+plotXYcorrelation(x=samples_pcompAvgs$x[,1], y=1:dim(normalized2)[2], main="PC1 vs AP position", ylab="AP position", xlab="PC1", col=1)
+
+plotXYcorrelation(x=samples_pcompAvgs$x[,2], y=1:dim(normalized2)[2], main="PC2 vs AP position", ylab="AP position", xlab="PC2", col=1)
+
+rm(normalized2)
+```
+
+**Figure 9.** Pricipal components' and samples' positions in the MOE. Having averaged samples and normalized ORs with markers geometric mean
+
+```{r MeanHVGsMoransI, echo=FALSE, message=FALSE, warning=FALSE}
+APdists<-as.matrix(dist(1:dim(HVGsAvgs)[2]))
+APdists.inv<-1/APdists
+diag(APdists.inv)<-0
+
+moransIs<-sapply(1:dim(HVGsAvgs)[1], function(x){Moran.I(HVGsAvgs[x,], APdists.inv)$observed})
+
+moransIsExp<-sapply(1:dim(HVGsAvgs)[1], function(x){Moran.I(HVGsAvgs[x,], APdists.inv)$expected})
+
+moransIsPvals<-sapply(1:dim(HVGsAvgs)[1], function(x){Moran.I(HVGsAvgs[x,], APdists.inv)$p.value})
+
+meanMoranI<-mean(moransIs)
+meanMoranIExp<-mean(moransIsExp)
+meanMoranIpval<-mean(moransIsPvals)
+
+print(paste("Mean Moran I =", meanMoranI))
+print(paste("Expected Moran I =", meanMoranIExp))
+print(paste("Mean Moran I p.value =", meanMoranIpval))
+
+tmp<-data.frame(APmoransIs=moransIs, APmoransIsPvals=moransIsPvals)
+rownames(tmp)<-rownames(HVGsAvgs)
+write.csv(tmp, "./supp_tables/APmoransI.csv")
+
+```
+
+
+##Differential expression along AP axis
+
+In order to find genes which are differentially expressed across the AP axis, I performed an autocorrelation test. So if a gene "g"'s expression at positions "x" correlated significantly (p<0.05) with gene expression at positions ("x+1"); and the correlation coefficient was bigger than 0.4, g is differentially expressed.
+
+```{r Differential_expression_forNeuronGenes1_ORs, echo=FALSE, message=FALSE, warning=FALSE}
+
+#Binarize gene expression data. If expression level is above the median, value=1, else, value=0
+
+binMat<-binarizeData(data=normalized)
+
+############################### AUTOCORRELATION
+
+ts<-ts(binMat[which(rownames(binMat)=="Olfr2"),])
+plot(ts, main="Olfr2")
+acf(ts, lag.max=(dim(binMat)[2]-10))
+Box.test(ts, type = "Ljung-Box", lag=(dim(binMat)[2]-10))
+
+#filter genes as candidates for testing depending on the difference between the group of samples with the minimum expression values and the group pf samples with the maximum expression values
+#filt<-getDEGcandidatesFlags(data=normalized, groupSize=3, minMinsMean4FC=0, minMaxsMean4FC=0, minFC=0, minDiff=0)
+filt<-getDEGcandidatesFlags(data=normalized, groupSize=3, minMinsMean4FC=1, minMaxsMean4FC=5, minFC=2, minDiff=4)
+
+#Autocorrelation test (Ljung-Box test)
+
+genes.table<-autocorrelationTest(data=binMat, maxLag=(dim(binMat)[2]-10), filter=filt)
+dim(normalized[genes.table$genes.names[genes.table$FDR<0.01],])
+genes.table$genes.names<-as.character(genes.table$genes.names)
+```
+
+**Figure 10.** Expression as time series and autocorrelation plots for some lateral and medial genes
+
+```{r DEGs_heat245, message=FALSE, warning=FALSE}
+logNormDEGs<-log10(normalized[genes.table$genes.names[genes.table$FDR<0.01],]+1)
+
+heatDEGs2.1<-t(apply(logNormDEGs, 1, normBetween0and1))
+
+#heatmap.2(as.matrix(heatDEGs2.1), Colv = NA, xlab="Position AP", trace='none', key.xlab="normalized gene expression", key.ylab=NA, key.title=NA, col=viridis(100), cexRow = 0.8, cexCol = 0.8, breaks=seq(0,1,0.1))
+
+heatmap.2(as.matrix(heatDEGs2.1), Colv = NA, xlab="Position AP", trace='none', key.xlab="log10meanRPMnorm", key.ylab=NA, key.title=NA, col=viridis(100), cexRow = 0.8, cexCol = 0.8)
+```
+
+**Figure 11.** Heatmap of DEGs with dendrogram clustering genes with similar spatial expression patterns
+
+```{r Differentially_expressed_ORs12, echo=FALSE, message=FALSE, warning=FALSE}
+#ORs among DEGs
+
+DEGsbox<-normalized[genes.table$genes.names[genes.table$FDR<0.01],]
+#colnames(DEGsbox)<-normalized[dim(normalized)[1],]
+
+DEGsfile<-genes_data[match(genes.table$genes.names[genes.table$FDR<0.01], genes_data$Gene.name),]
+DEGsfile<-data.frame(DEGsfile, genes.table[genes.table$FDR<0.01,])
+DEGsfile<-DEGsfile[,-7]
+
+write.csv(DEGsfile, "./supp_tables/newAPDEORs.autocor.binMatFDR0.01filt_NormMks_G99.csv")
+
+```
+
+**Figure 12.** Differentially expressed ORs
+
+```{r fit_logNormdata, echo=FALSE, message=FALSE, warning=FALSE}
+position<-as.numeric(colnames(logNormDEGs))
+logNormDEGs<-data.frame(position, t(logNormDEGs))
+
+fitted_data<-apply(logNormDEGs[,2:length(colnames(logNormDEGs))], 2, function(x){locfit(x~lp(logNormDEGs[,1], deg = 2, nn=1), data=logNormDEGs)})
+
+###### Analysis continues using normalized between 0 and 1 fitted(with predicted values if necessary) log10 rpm normalized data #####
+
+#deTaars<-fitted_data[grep("Taar", names(fitted_data))]
+deORs<-fitted_data
+deORs<-sapply(1:length(deORs), function(x){predict(deORs[[x]],  c(1:max(position)))})
+colnames(deORs)<-names(fitted_data)
+deORs<-t(deORs)
+deORs<-t(apply(deORs, 1, normBetween0and1))
+colnames(deORs)<-position
+```
+
+```{r ComparetoChemSDEORs, echo=FALSE, message=FALSE, warning=FALSE}
+ORsChems<-read.csv("../DEORsChemSens.csv", stringsAsFactors = FALSE, sep=";")
+DEORsChems<-ORsChems$gene.name[ORsChems$inferred.zone.index!="low expression"]
+
+DEORsboxDEORsChems_venn<-venn.diagram(list(DEORsbox=gsub("\\.", "-", rownames(deORs)), DEORsChemS=DEORsChems), fill = c("red", "blue"), hyper.test = TRUE, total.population = length(union(gsub("\\.", "-", rownames(normalized)), DEORsChems)), lower.tail = FALSE, alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, cat.pos = c(-10,10), sub.cex = 1.5, filename = NULL, scaled=T)
+
+grid.draw(DEORsboxDEORsChems_venn)
+
+```
+
+
+**Figure 30.** Venn Diagram showing the overlap between our differentially expressed OR genes and the ones found in https://academic.oup.com/chemse/article/43/6/427/5001524#118517741 with FDR<0.18
+
+3 ORs:
+Olfr727
+Olfr788
+Olfr309
+8 other genes:        
+Cytl1, a gene that regulates chondrogenesis 
+Spen, expressed highly in olfactory neurons and possible transcription factor  that may serve as a nuclear matrix platform that organizes and integrates transcriptional responses
+Tac1, not expressed in neurons AND tachykinins are active peptides which excite neurons, evoke behavioral responses, are potent vasodilators and secretagogues, and contract (directly or indirectly) many smooth muscles 
+Camp, expressed in stem cell and neuronal layers AND is a cathelicidin antimicrobial peptide 
+Moxd2, DBH-like monooxygenase protein 2 (neurotransmitters metabolism)
+Nos1, Nitric oxide synthase 
+Nnat, highly expressed in stem cell layer 
+Gabpb1, highly expressed in neurons AND GA-binding protein subunit beta-1 AND transcription factor capable of interacting with purine rich repeats (GA repeats)
+
+##Differentially Expressed ORs Clustering
+
+```{r DifferentiallyExpressed_ORs_Clustering67, echo=FALSE, message=FALSE, warning=FALSE}
+
+#Clustering by fitted data from differentially expressed ORs 
+
+#Clustering
+
+test.dist<-as.dist(sqrt(0.5*((1-cor(t(deORs),method="spearman"))))) #define correlation distance matrix
+#estimate number of clusters with dynamicTreeCut
+#cut2<-cutreeDynamic(hclust(test.dist, method="average"), distM=as.matrix(test.dist), 
+#                    minClusterSize=round((dim(deORs)[1])*0.02), method="hybrid",deepSplit = 1 #)
+cut2<-cutreeDynamic(hclust(test.dist, method="average"), distM=as.matrix(test.dist), 
+                    minClusterSize=10, method="hybrid",deepSplit = 0 )
+clusters_deORs<-labels2colors(cut2) 
+if("white" %in% clusters_deORs){
+  clusters_deORs[clusters_deORs=="white"]<-"skyblue4"
+}
+
+names(clusters_deORs)<-row.names(deORs)
+table(clusters_deORs)
+
+dframe<-data.frame(olfr=names(clusters_deORs), cluster=clusters_deORs)
+#write.csv(dframe, "./clusters_deORsAP.csv")
+```
+
+**Table 2.** Number of ORs per spatial pattern cluster (Clusters named after colors)
+
+```{r ForClass1ORs, echo=FALSE, message=FALSE, warning=FALSE}
+Class1<-read.csv("../Mouse_Class_I_ORs.csv", stringsAsFactors = FALSE, header=T)
+
+classCol<-rep("blue", length(clusters_deORs))
+classCol[names(clusters_deORs) %in% Class1[,1]]<-"red"
+
+c1NoDE<-Class1[,1]
+if(length(which(c1NoDE %in% rownames(deORs)))>0){
+  c1NoDE<-c1NoDE[-which(c1NoDE %in% rownames(deORs))]
+}
+
+c1NoDE<-c1NoDE[c1NoDE %in% rownames(normalized)]
+par(mfrow=c(3, 2))
+for(i in (1:length(c1NoDE))){
+  plot(position, log10(normalized[which(rownames(normalized)==c1NoDE[i]),]+1), main=c1NoDE[i], xlab="position AP", ylab="log10 mean rpm expression", pch=19)
+  mtext(paste("FDR =", genes.table$FDR[genes.table$genes.names==c1NoDE[i]]), side=1, cex=0.6)
+}
+```
+
+**Figure 20.** Some Class 1 ORs that we don't get as differentially expressed
+
+```{r Visualize_clusters, echo=FALSE, message=FALSE, warning=FALSE}
+
+#visualize data with tsne
+set.seed(10)
+test.tsne<-Rtsne(test.dist, is_distance = T, perplexity=10)
+plot(test.tsne$Y, col=alpha(clusters_deORs, 0.3), pch=19, xlab="tSNE1", ylab="tSNE2")
+
+plot(test.tsne$Y, col=alpha(classCol, 0.3), pch=19, xlab="tSNE1", ylab="tSNE2")
+```
+
+**Figure 15.** Tsne plot for differentially expressed ORs.
+**Figure 19.** Tsne plot for class 1 and 2 ORs. Class 1 in red, class 2 in blue
+
+```{r ORsUmap, echo=FALSE, message=FALSE, warning=FALSE}
+ORsUmap<-umap(deORs) #normalized Differentially Expressed OR genes
+plot(ORsUmap$layout[,1], ORsUmap$layout[,2], col=alpha(clusters_deORs, 0.3), pch=19, xlab="UMAP1", ylab="UMAP2")
+
+plot(ORsUmap$layout[,1], ORsUmap$layout[,2], col=alpha(classCol, 0.3), pch=19, xlab="UMAP1", ylab="UMAP2")
+
+```
+
+**Figure a.** ORs Umap
+**Figure 19.** Umap plot for class 1 and 2 ORs. Class 1 in red, class 2 in blue
+
+```{r ORsDiffmap, echo=FALSE, message=FALSE, warning=FALSE}
+ORsDiffmap<-DiffusionMap(deORs, distance ="rankcor") #normalized Differentially Expressed OR genes
+dpt <- DPT(ORsDiffmap, tips=1) #pseudotime
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(clusters_deORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(classCol, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+plot.DPT(dpt)
+
+pseudotime<-plot.DPT(dpt)$data$Colour
+names(pseudotime)<-rownames(deORs)
+```
+
+**Figure a.** ORs Diffmap
+**Figure 19.** Diffmap plot for class 1 and 2 ORs. Class 1 in red, class 2 in blue
+**Diffmap pseudotime**
+
+```{r}
+#pca<-prcomp(deORs, scale. = T)
+#plot(pca$x[,1], pca$x[,2], col=alpha(clusters_deORs, 0.3), pch=19, xlab="PC1", ylab="PC2")
+
+#plot(pca$x[,1], pca$x[,2], col=alpha(classCol, 0.3), pch=19, xlab="PC1", ylab="PC2")
+
+```
+
+
+
+```{r Pattern_perCluster, echo=FALSE, message=FALSE, warning=FALSE}
+#Expression patterns per cluster
+
+par(mfrow=c(3, 3))
+
+plotMeanPatternPerCluster(data=deORs, clusters=clusters_deORs, ylim=c(0, 1), ylab="fitted norm. log10 mean rpm expression", xlab="position AP")
+
+```
+
+**Figure 16.** Average gene expression per cluster across the AP axis and spatial expression pattern per gene in colors. Gene expression values were log10 scaled and then normalized to values between 0 and 1.
+
+```{r Visualize_PreviouslyDefinedZones, echo=FALSE, message=FALSE, warning=FALSE}
+ZoneIndexes<-read.csv("../ORsZoneIndexesNewNames.csv", stringsAsFactors = FALSE, header=F, dec = ",")
+colnames(ZoneIndexes)<-ZoneIndexes[2,]
+ZoneIndexes<-ZoneIndexes[-(1:2),]
+ZoneIndexes$`zone index`<-gsub(",", ".", ZoneIndexes$`zone index`)
+ZoneIndexes$`modern gene name`<-gsub("-", ".", ZoneIndexes$`modern gene name`)
+
+#Get colors only for ORs studied in Miyamichi et al 2005
+zoneCol<-rep('NA', length(clusters_deORs))
+for(x in 1:length(ZoneIndexes$`modern gene name`)){
+  zoneCol[which(names(clusters_deORs)==ZoneIndexes$`modern gene name`[x])]<-clusters_deORs[which(names(clusters_deORs)==ZoneIndexes$`modern gene name`[x])]
+}
+set.seed(10)
+test.tsne<-Rtsne(test.dist, is_distance = T, perplexity=10)
+plot(test.tsne$Y, xlab="tSNE1", ylab="tSNE2", col=alpha(zoneCol, 0.3), pch=19)
+
+```
+
+**Figure 17.** Tsne plot for ORs studied before. Different colors are for ORs from different spatial pattern clusters (https://www.ncbi.nlm.nih.gov/pubmed/15814789)
+
+```{r myIndexes, echo=FALSE, message=FALSE, warning=FALSE}
+#get "zone indexes" for all ORs. This will be weighted averages of positions: weights=expression values 
+#ourIndexes<-apply(deORs, 1, function(x){weighted.mean(1:max(position), w=x)})
+
+#get "zone indexes" for all ORs. This will be position of the expression peak (maximum) 
+ourIndexes<-apply(deORs, 1, function(x){which(x==max(x))})
+```
+
+```{r jitterplotFGH, echo=FALSE, message=FALSE, warning=FALSE}
+
+cluster2index<-clusters_deORs[match(ZoneIndexes$`modern gene name`, names(clusters_deORs))]
+cluster2index<-data.frame(ZoneIndexes, Cluster=cluster2index)
+cluster2index<-cluster2index[-which(is.na(cluster2index$Cluster)),]
+cluster2index<-data.frame(cluster2index, myIndx=ourIndexes[match(cluster2index$modern.gene.name, names(ourIndexes))])
+
+#Sort clusters according to the position where the average expression of the genes there is the highest
+#clustsMaxPos<-getMaxPositionPerCluster(data=deORs, clusters = clusters_deORs)
+
+#spClusterNo<-rep(1, dim(cluster2index)[1])
+#i=1
+#for(cluster in names(sort(clustsMaxPos))){
+#  spClusterNo[which(cluster2index$Cluster==cluster)]<-i
+#  i<-i+1
+#}
+
+#spClusterMaxPos<-rep(1, dim(cluster2index)[1])
+#i=1
+#for(cluster in names(sort(clustsMaxPos))){
+#  spClusterMaxPos[which(cluster2index$Cluster==cluster)]<-clustsMaxPos[cluster]
+#  i<-i+1
+#}
+
+#cluster2index<-data.frame(cluster2index, spClusterNo, spClusterMaxPos)
+
+#plotClusterJitter(x=cluster2index$spClusterNo, y=cluster2index$zone.index, xlabels=unique(cluster2index$Cluster[order(cluster2index$spClusterNo)]), col=cluster2index$Cluster, xlab="spatial expression cluster", ylab="Zone index")
+
+#cor.test(as.numeric(cluster2index$zone.index), cluster2index$spClusterMaxPos, method = "spearman")
+
+plot(x=cluster2index$myIndx, y=cluster2index$zone.index, col=alpha(cluster2index$Cluster, 0.3), xlab="our Indexes", ylab="Zone index by Miyamichi", pch=19)
+
+cor.test(as.numeric(cluster2index$myIndx), as.numeric(cluster2index$zone.index), method = "spearman")
+
+#plotClusterJitter(x=cluster2index$spClusterNo, y=cluster2index$spClusterMaxPos, xlabels=unique(cluster2index$Cluster[order(cluster2index$spClusterNo)]), col=cluster2index$Cluster, xlab="spatial expression cluster", ylab="Zone index")
+```
+
+**Figure 18** Zone indexes per spatial expression cluster
+
+```{r jitterplotDPT, echo=FALSE, message=FALSE, warning=FALSE}
+cluster2dpt<-clusters_deORs[match(ZoneIndexes$`modern gene name`, names(clusters_deORs))]
+cluster2dpt<-data.frame(ZoneIndexes, Cluster=cluster2dpt)
+cluster2dpt<-cluster2dpt[-which(is.na(cluster2dpt$Cluster)),]
+cluster2dpt<-data.frame(cluster2dpt, myIndx=pseudotime[match(cluster2dpt$modern.gene.name, names(pseudotime))])
+
+plot(x=cluster2dpt$myIndx, y=cluster2dpt$zone.index, col=alpha(cluster2dpt$Cluster, 0.3), xlab="Indexes by DPT", ylab="Zone index by Miyamichi", pch=19)
+
+cor.test(as.numeric(cluster2dpt$myIndx), as.numeric(cluster2dpt$zone.index), method = "spearman")
+```
+
+**Figure 18** DPT Zone indexes per spatial expression cluster
+
+
+##Genomic clustering
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1794568/
+https://genome.weizmann.ac.il/horde/app/webroot/CLICs/
+
+```{r Clustering_byGenPosition, message=FALSE, warning=FALSE}
+#Genomic positions
+
+genes_data<-genes_data[order(genes_data$Chromosome.scaffold.name),]
+ORs_data<-genes_data[grep("Olfr", genes_data$Gene.name),]
+
+#Clusters by position in the genome
+#To be in the same cluster, 2 ORs' start positions must be 300000 bases away maximum
+
+#ORs_data$gen_clust<-assignGenomicClusters(data=ORs_data, maxDist=300000, chromosomesColName="Chromosome.scaffold.name", startPosColName="Gene.start..bp.")
+
+#Genomic clusters from https://elifesciences.org/articles/28620
+
+ORgenClusts<-read.xls("./elife-ORclusters.xlsx", stringsAsFactors = F)
+ORgenClusts$chromosome<-gsub(":.+", "", ORgenClusts$mm10.coordinates)
+ORgenClusts$chromosome<-gsub("chr", "", ORgenClusts$chromosome)
+
+ORgenClusts$start<-gsub("chr.+:", "", ORgenClusts$mm10.coordinates)
+ORgenClusts$start<-as.numeric(gsub("-.+", "", ORgenClusts$start))
+
+ORgenClusts$end<-gsub("chr.+:", "", ORgenClusts$mm10.coordinates)
+ORgenClusts$end<-as.numeric(gsub(".+-", "", ORgenClusts$end))
+
+ORgenClusts$Length.of.cluster<-as.numeric(gsub(",", "", ORgenClusts$Length.of.cluster))
+
+#Assign clusters
+ORs_data$gen_clust<-as.character(sapply(1:dim(ORs_data)[1], function(x){ORgenClusts$Cluster[which(ORgenClusts$chromosome==ORs_data$Chromosome.scaffold.name[x] & ORgenClusts$start<=ORs_data$Gene.start..bp.[x] & ORgenClusts$end>=ORs_data$Gene.end..bp.[x])]}))
+
+ORs_data<-cbind(ORs_data, ORgenClusts[match(ORs_data$gen_clust, ORgenClusts$Cluster), 3:10])
+
+#Greek islands from https://elifesciences.org/articles/28620
+
+greekIslands<-read.xls("./elife-greekIslands.xlsx", stringsAsFactors = F)
+greekIslands$islandChr<-gsub(":.+", "", greekIslands$mm10.coordinates)
+greekIslands$islandChr<-gsub("chr", "", greekIslands$islandChr)
+
+greekIslands$islandStart<-gsub("chr.+:", "", greekIslands$mm10.coordinates)
+greekIslands$islandStart<-as.numeric(gsub("-.+", "", greekIslands$islandStart))
+
+greekIslands$islandEnd<-gsub("chr.+:", "", greekIslands$mm10.coordinates)
+greekIslands$islandEnd<-as.numeric(gsub(".+-", "", greekIslands$islandEnd))
+
+greekIslands$islandLength<-abs(greekIslands$islandEnd - greekIslands$islandStart)
+
+#Assign islands
+ORs_data$closestIsland<-as.character(sapply(ORs_data$Gene.name, function(x){findClosestIsland(gene=x, genesData = ORs_data, islandsData = greekIslands, islandsChrCol="islandChr", genesChrCol="Chromosome.scaffold.name", genesNamesCol="Gene.name", islandsStartCol="islandStart", islandsEndCol="islandEnd", genesStartCol="Gene.start..bp.", islandsNamesCol="Name")[2]}))
+
+ORs_data$dist2ClosestIsland<-as.character(sapply(ORs_data$Gene.name, function(x){findClosestIsland(gene=x, genesData = ORs_data, islandsData = greekIslands, islandsChrCol="islandChr", genesChrCol="Chromosome.scaffold.name", genesNamesCol="Gene.name", islandsStartCol="islandStart", islandsEndCol="islandEnd", genesStartCol="Gene.start..bp.", islandsNamesCol="Name")[1]}))
+
+ORs_data$Class<-2
+ORs_data$Class[which(ORs_data$Gene.name %in% Class1$Mouse.class.I.ORs)]<-1
+ORs_data$Class<-as.factor(ORs_data$Class)
+
+chrLengths<-read.csv("./supp_tables/male.mm10.chrom.sizes.tsv", sep="\t", header=F)
+chrLengths<-chrLengths$V2[match(paste("chr", ORs_data$Chromosome.scaffold.name, sep=""), chrLengths$V1)]
+ORs_data$geneChrPos<-ORs_data$Gene.start..bp./chrLengths
+
+ORs_data<-cbind(ORs_data, greekIslands[match(ORs_data$closestIsland, greekIslands$Name), 4:11])
+
+#ORs_data$gen_clust<-sapply(1:dim(ORs_data)[1], function(x){ORgenClusts$Cluster[which(ORgenClusts$chromosome==ORs_data$Chromosome.scaffold.name[x] & ORgenClusts$start<=ORs_data$Gene.start..bp.[x] & ORgenClusts$end>ORs_data$Gene.start..bp.[x])]})
+
+#ORs genomic ranges for karyoplots
+#ORs <- toGRanges(data.frame(chr=paste("chr", ORs_data$Chromosome.scaffold.name, sep=""), start=ORs_data$Gene.start..bp., end=ORs_data$Gene.end..bp.))
+
+#Karyoplots
+#kp <- plotKaryotype(genome="mm10", main="ORs positions in chromosomes")
+#kpPlotRegions(kp, ORs, col="#FFAACC")
+#library(Repitools)
+#cpgDensityPlot(GRangesList(ORs1), cols=rainbow(length(GRangesList(ORs1))), xlim=c(0,20), lty = 1, lwd = 1, main="CpG Density Plot", verbose=TRUE)
+```
+
+**Figure 21.** ORs positions in chromosomes
+
+##Test associaion between spatial patterns and ORs position in the genome
+
+To test if there was an association between genes' spatial expression patterns across the AP axis and their positions in the genome, we ran a Chi-squared test using data from clustering by spatial expression pattern and clustering by genomic position. As the p-value resulting from this test is lower than 0.05, we can say there is an association between the property of being in the same genomic cluster and the property of being in the same expression pattern cluster.
+
+```{r Association_Pattern-GenPosition, message=FALSE, warning=FALSE}
+#Test if there is an association between genes' position in the genome and their spatial expresssion pattern
+
+deORs_data<-ORs_data[match(rownames(deORs), ORs_data$Gene.name),]
+deORs_data$clusters<-clusters_deORs
+deORs_data<-deORs_data[-grep("NA", rownames(deORs_data)),]
+
+#plotGenesFromCluster(data=deORs_data, cluster="blue", clustersColName="clusters", chromosomesColName="Chromosome.scaffold.name", startPosColName="Gene.start..bp.", endPosColName="Gene.end..bp.", genome="mm10", main="Blue cluster ORs positions in chromosomes")
+
+tbl<-table(deORs_data$gen_clust, deORs_data$clusters)
+tbl
+```
+
+**Table 3.** Number of genes per spatial expression cluster in each genomic cluster. (Columns=Spatial pattern clusters, Rows=Genomic clusters)
+
+```{r Association_Pattern-GenPosition2, message=FALSE, warning=FALSE}
+#Test if there is an association between genes' position in the genome and their spatial expresssion pattern
+
+#nonDEORs_data<-ORs_data[match(nonDEORs2, ORs_data$Gene.name),]
+
+#kpnonDEORs <- toGRanges(data.frame(chr=paste("chr", nonDEORs_data$Chromosome.scaffold.name, sep=""), start=nonDEORs_data$Gene.start..bp., end=nonDEORs_data$Gene.end..bp.))
+#kp2 <- plotKaryotype(genome="mm10", main="Blue cluster ORs positions in chromosomes")
+
+#kpPlotRegions(kp, ORs, col="#FFAACC")
+#kpPlotRegions(kp2, kpnonDEORs, col="red")
+
+#ORs_data$DE<-"Yes"
+#ORs_data$DE[match(nonDEORs2, ORs_data$Gene.name)]<-"No"
+
+#tbl2<-table(ORs_data$gen_clust, ORs_data$DE)
+#tbl2
+```
+
+
+```{r ChiSquared_associationTest, message=FALSE, warning=FALSE}
+chisq.test(tbl)
+
+
+#chisq.test(tbl2)
+
+DEGsfile<-cbind(DEGsfile, clusters_deORs, ourIndexes)
+write.csv(DEGsfile, "./supp_tables/newAPDEORs.autocor.binMatFDR0.01filt_NormMks_G99.csv")
+```
+
+## Differential expression with ORs normalized by markers and other genes no (using all genes)
+
+```{r Differential_expression_forAllGenes, echo=FALSE, message=FALSE, warning=FALSE}
+#Olfrs and chemosensory receptors normalized by geometric mean of neuro markers
+normGenes<-normalizeByMarkersGeoMean(data=norm_complete[c(rownames(norm_complete)[grep("Taar", rownames(norm_complete))], rownames(norm_complete)[grep("Ms4a", rownames(norm_complete))], rownames(norm_complete)[grep("Vmn", rownames(norm_complete))], "Gucy2d", "Gucy1b2", "Omp", "Cnga2", "Gnal"),], markers=c("Omp", "Cnga2", "Gnal"))
+
+normGenes<-normGenes[c(rownames(norm_complete)[grep("Taar", rownames(norm_complete))], rownames(norm_complete)[grep("Ms4a", rownames(norm_complete))], rownames(norm_complete)[grep("Vmn", rownames(norm_complete))], "Gucy2d", "Gucy1b2"), ]
+
+
+normalized2<-norm_complete
+normalized2[grep("Olfr", rownames(normalized2)),]<-normalized
+normalized2[c(rownames(norm_complete)[grep("Taar", rownames(norm_complete))], rownames(norm_complete)[grep("Ms4a", rownames(norm_complete))], rownames(norm_complete)[grep("Vmn", rownames(norm_complete))], "Gucy2d", "Gucy1b2"),]<-normGenes
+normalized<-normalized2
+rm(normalized2)
+
+write.csv(normalized, "./supp_tables/newAP_AllGenes_normalized_rpm_repsAvg_mks.csv")
+
+#Binarize gene expression data. If expression level is above the median, value=1, else, value=0
+
+binMat<-binarizeData(data=normalized)
+
+############################### AUTOCORRELATION
+
+ts<-ts(binMat[which(rownames(binMat)=="Acsm4"),])
+plot(ts, main="Acsm4")
+
+plot(position, log10(normalized["Acsm4",]+1), xlim=c(0, max(position)+1), main="Acsm4", xlab="position AP", ylab="log10 mean rpm expression", pch=19)
+abline(h=median(log10(normalized["Acsm4",]+1)), col="red")
+
+
+plot(position, binMat["Acsm4",], xlim=c(0, max(position)+1), main="Acsm4", xlab="position AP", ylab="binarized expression", pch=19)
+
+acf(ts, lag.max=(dim(binMat)[2]-10))
+#dev.off()
+
+acf(ts, lag.max=(dim(binMat)[2]-10))
+Box.test(ts, type = "Ljung-Box", lag=(dim(binMat)[2]-10))
+
+#filter genes as candidates for testing depending on the difference between the group of samples with the minimum expression values and the group pf samples with the maximum expression values
+filt<-getDEGcandidatesFlags(data=normalized, groupSize=3, minMinsMean4FC=1, minMaxsMean4FC=5, minFC=2, minDiff=4)
+
+#Autocorrelation test (Ljung-Box test)
+
+genes.table<-autocorrelationTest(data=binMat, maxLag=(dim(binMat)[2]-10), filter=filt)
+dim(normalized[genes.table$genes.names[genes.table$FDR<0.01],])
+genes.table$genes.names<-as.character(genes.table$genes.names)
+```
+
+**Autocorrelation plot of Acsm4**
+
+```{r extraDEGs1, message=FALSE, warning=FALSE}
+extraDEGs<-read.csv("./3D/APextraDEGs.csv", stringsAsFactors = F, row.names=1)
+top20extraDEGs<-genes.table[which(genes.table$genes.names %in% extraDEGs$x),]
+top20extraDEGs<-top20extraDEGs[1:20,]
+
+write.csv(top20extraDEGs, "./supp_tables/top20APextraDEGs.csv")
+```
+
+
+```{r DEGs_heat2, message=FALSE, warning=FALSE}
+logNormDEGs<-log10(normalized[genes.table$genes.names[genes.table$FDR<0.01],]+1)
+
+heatDEGs2.1<-t(apply(logNormDEGs, 1, normBetween0and1))
+
+heatmap.2(as.matrix(heatDEGs2.1), Colv = NA, xlab="Position AP", trace='none', key.xlab="log10meanRPMnorm", key.ylab=NA, key.title=NA, col=viridis(100), cexRow = 0.8, cexCol = 0.8)
+
+
+```
+
+**Figure** Heatmap of DEGs with dendrogram clustering genes with similar spatial expression patterns
+
+```{r Differentially_expressed_Genes, echo=FALSE, message=FALSE, warning=FALSE}
+
+#ORs among DEGs
+
+DEGsbox<-normalized[genes.table$genes.names[genes.table$FDR<0.01],]
+#colnames(DEGsbox)<-normalized[dim(normalized)[1],]
+
+DEGsfile<-genes_data[match(genes.table$genes.names[genes.table$FDR<0.01], genes_data$Gene.name),]
+DEGsfile<-data.frame(DEGsfile, genes.table[genes.table$FDR<0.01,])
+DEGsfile<-DEGsfile[,-7]
+
+write.csv(DEGsfile, "./supp_tables/newAPDEGs.autocor.binMatFDR0.01filt_G99.csv")
+
+```
+
+```{r ctVar_expDiff, echo=FALSE, message=FALSE, warning=FALSE}
+agGenes<-read.csv("./supp_tables/ag_genes4deconv_T2.csv")
+geneExpPerCT<-read.csv("./supp_tables/scTPMs.csv", row.names = 1)
+cellType<-strsplit(colnames(geneExpPerCT), split = "\\.")
+cellType<-sapply(1:length(cellType), function(x){cellType[[x]][1]})
+cellType<-as.numeric(gsub("X", "", cellType))
+cellType[which(cellType==1 | cellType==5 | cellType==8)]<-"HBC"
+cellType[which(cellType==2 | cellType==10 | cellType==14)]<-"INP"
+cellType[which(cellType==3)]<-"GBC"
+cellType[which(cellType==4 | cellType==7)]<-"SC"
+cellType[which(cellType==9 | cellType==12)]<-"OSN"
+cellType[which(cellType==11 | cellType==15)]<-"MVC"
+
+geneExpPerCT<-geneExpPerCT[which(rownames(geneExpPerCT) %in% DEGsfile$Gene.name),]
+geneExpPerCT<-geneExpPerCT[-which(rownames(geneExpPerCT) %in% agGenes$genes),]
+MeanGeneExpPerCT<-t(apply(geneExpPerCT, 1, function(i){tapply(i, cellType, mean)}))
+MeanGeneExpPerCT<-MeanGeneExpPerCT[,order(c(3, 1, 2, 6, 5, 4))]
+#Filter genes with max. mean exp < 10
+MeanGeneExpFilt<-apply(MeanGeneExpPerCT, 1, function(x){max(x)<10})
+MeanGeneExpPerCT<-MeanGeneExpPerCT[-which(MeanGeneExpFilt==TRUE),]
+
+DEGs2test<-norm_complete[which(rownames(norm_complete) %in% rownames(MeanGeneExpPerCT)),]
+
+#tmp cols = Cell type proportions in a slice * mean gene expression in that cell type
+
+#row sums tmp = gene expression pattern if gene expression were constant in each cell type
+
+geneExpPat_due2CTdist<-t(sapply(rownames(DEGs2test), function(gene){
+  tmp=sapply(colnames(cellPropsNusvr), function(x){cellPropsNusvr[,x]*MeanGeneExpPerCT[gene,x]})
+  rowSums(tmp)
+}))
+
+length(which(rowSums(geneExpPat_due2CTdist)==0))
+#0
+
+#DEGs2test<-DEGs2test[-which(rowSums(geneExpPat_due2CTdist)==0),]
+#geneExpPat_due2CTdist<-geneExpPat_due2CTdist[-which(rowSums(geneExpPat_due2CTdist)==0),]
+#Normalise
+#geneExpPat_due2CTdist<-t(sapply(rownames(geneExpPat_due2CTdist), function(x){
+#  geneExpPat_due2CTdist[x,]*sum(DEGs2test[x,])/sum(geneExpPat_due2CTdist[x,])
+#}))
+
+DEGs2test<-t(apply(DEGs2test, 1, normBetween0and1))
+geneExpPat_due2CTdist<-t(apply(geneExpPat_due2CTdist, 1, normBetween0and1))
+
+trueExpPatterns <- DEGs2test - geneExpPat_due2CTdist
+#trueExpPatterns<-t(apply(trueExpPatterns, 1, normBetween0and1))
+binMat_truePatts<-binarizeData(data=trueExpPatterns)
+truePatts_table<-autocorrelationTest(data=binMat_truePatts, maxLag=(dim(binMat_truePatts)[2]-10), filter=rep(1, dim(binMat_truePatts)[1]))
+write.csv(truePatts_table, "./supp_tables/SDEtest_DEGsTruePatts_AP.csv")
+
+
+## A few numbers
+print("tested genes:")
+dim(binMat_truePatts)[1]
+print("Genes with true spatial pattern (FDR<0.01):")
+length(which(truePatts_table$FDR<0.01))
+print("Proportion of genes with true spatial pattern (FDR<0.01):")
+length(which(truePatts_table$FDR<0.01))/dim(binMat_truePatts)[1]
+print("Proportion of genes with true spatial pattern (FDR<0.05):")
+length(which(truePatts_table$FDR<0.05))/dim(binMat_truePatts)[1]
+
+print("tested Olfrs:")
+length(truePatts_table$genes.names[grep("Olfr", truePatts_table$genes.names)])
+print("Olfrs with true spatial pattern (FDR<0.01):")
+length(which(truePatts_table$FDR[grep("Olfr", truePatts_table$genes.names)]<0.01))
+print("Proportion of Olfrs with true spatial pattern (FDR<0.01):")
+length(which(truePatts_table$FDR[grep("Olfr", truePatts_table$genes.names)]<0.01))/length(truePatts_table$genes.names[grep("Olfr", truePatts_table$genes.names)])
+print("Proportion of Olfrs with true spatial pattern (FDR<0.05):")
+length(which(truePatts_table$FDR[grep("Olfr", truePatts_table$genes.names)]<0.05))/length(truePatts_table$genes.names[grep("Olfr", truePatts_table$genes.names)])
+
+truePatts_table[which(truePatts_table$genes.names=="Cnga2"),]
+truePatts_table[which(truePatts_table$genes.names=="Gnal"),]
+truePatts_table[which(truePatts_table$genes.names=="Omp"),]
+
+c("Cnga2", "Omp", "Gnal") %in% rownames(DEGsbox)
+pdf("./figures_pdf2/mks_CTtrend_AP_rev.pdf")
+par(mfrow=c(2, 2))
+for(marker in c("Acsm4", "Nqo1", "Gnal", "Cnga2")){
+  #plot(1:78, normalized[marker,], xlim=c(0, 80), main=marker, xlab="position P-A", ylab="rpm expression")
+  plot(1:dim(DEGs2test)[2], DEGs2test[marker,], xlim=c(0, dim(DEGs2test)[2]+1), main=marker, xlab="position AP", ylab="mean rpm expression", pch=19, ylim=c(0, max(DEGs2test[marker,])+1))
+  lines(locfit(DEGs2test[marker,]~lp(1:dim(DEGs2test)[2], deg = 2, nn=1), data=as.data.frame(DEGs2test)), col="red")
+}
+
+par(mfrow=c(2, 2))
+for(marker in c("Acsm4", "Nqo1", "Gnal", "Cnga2")){
+  plot(1:dim(geneExpPat_due2CTdist)[2], geneExpPat_due2CTdist[marker,], xlim=c(0, dim(geneExpPat_due2CTdist)[2]+1), main=paste(marker, "CT pattern"), xlab="position AP", ylab="mean rpm expression", pch=19, ylim=c(0, max(geneExpPat_due2CTdist[marker,])+1))
+  lines(locfit(geneExpPat_due2CTdist[marker,]~lp(1:dim(geneExpPat_due2CTdist)[2], deg = 2, nn=1), data=as.data.frame(geneExpPat_due2CTdist)), col="red")
+}
+
+#par(mfrow=c(2, 2))
+#for(marker in c("Acsm4", "Nqo1", "Gnal", "Cnga2")){
+#  plot(1:dim(trueExpPatterns)[2], trueExpPatterns[marker,], xlim=c(0, dim(trueExpPatterns)[2]+1), main=marker, xlab="position AP", ylab="mean rpm expression", pch=19, ylim=c(min(trueExpPatterns[marker,]), max(trueExpPatterns[marker,])+1))
+#  lines(locfit(trueExpPatterns[marker,]~lp(1:dim(trueExpPatterns)[2], deg = 2, nn=1), data=as.data.frame(trueExpPatterns)), col="red")
+#}
+
+par(mfrow=c(2, 2))
+for(marker in c("Acsm4", "Nqo1", "Gnal", "Cnga2")){
+  plotXYcorrelation(x=geneExpPat_due2CTdist[marker,], y=DEGs2test[marker,], main=marker, ylab="g^(x)", xlab="g(x)", col=1)
+}
+dev.off()
+```
+
+
+```{r ctVar_expDiff2, echo=FALSE, message=FALSE, warning=FALSE}
+
+spearmanPvals<-sapply(rownames(DEGs2test), function(gene){
+  cor.test(geneExpPat_due2CTdist[gene,], DEGs2test[gene,], method="spearman")$p.val
+})
+spearmanCors<-sapply(rownames(DEGs2test), function(gene){
+  cor.test(geneExpPat_due2CTdist[gene,], DEGs2test[gene,], method="spearman")$estimate
+})
+spearmanFDRs<-p.adjust(spearmanPvals, method="fdr")
+
+CTpredictableDEGs<-names(spearmanFDRs)[which(spearmanFDRs<0.01 & abs(spearmanCors)>=0.45)]
+
+is.predictable<-names(spearmanFDRs) %in% CTpredictableDEGs
+write.csv(data.frame(geneName=names(spearmanFDRs), spearmanRho=spearmanCors, pval=spearmanPvals, fdr=spearmanFDRs, is.predictable=is.predictable), "./supp_tables/DEGsCTpredictability_AP_rev.csv")
+
+pdf("./figures_pdf2/predictableOlfrs_AP_rev.pdf")
+par(mfrow=c(2, 2))
+for(marker in CTpredictableDEGs[grep("Olfr", CTpredictableDEGs)]){
+  #plot(1:78, normalized[marker,], xlim=c(0, 80), main=marker, xlab="position P-A", ylab="rpm expression")
+  plot(1:dim(DEGs2test)[2], DEGs2test[marker,], xlim=c(0, dim(DEGs2test)[2]+1), main=paste(marker, "original pattern"), xlab="position AP", ylab="mean rpm expression", pch=19, ylim=c(0, max(DEGs2test[marker,])+1))
+  lines(locfit(DEGs2test[marker,]~lp(1:dim(DEGs2test)[2], deg = 2, nn=1), data=as.data.frame(DEGs2test)), col="red")
+}
+
+par(mfrow=c(2, 2))
+for(marker in CTpredictableDEGs[grep("Olfr", CTpredictableDEGs)]){
+  plot(1:dim(geneExpPat_due2CTdist)[2], geneExpPat_due2CTdist[marker,], xlim=c(0, dim(geneExpPat_due2CTdist)[2]+1), main=paste(marker, "pattern due to cell types dist."), xlab="position AP", ylab="mean rpm expression", pch=19, ylim=c(0, max(geneExpPat_due2CTdist[marker,])+1))
+  lines(locfit(geneExpPat_due2CTdist[marker,]~lp(1:dim(geneExpPat_due2CTdist)[2], deg = 2, nn=1), data=as.data.frame(geneExpPat_due2CTdist)), col="red")
+}
+
+par(mfrow=c(2, 2))
+for(marker in CTpredictableDEGs[grep("Olfr", CTpredictableDEGs)]){
+  barplot(MeanGeneExpPerCT[marker,], main=marker)
+}
+dev.off()
+
+write.csv(geneExpPat_due2CTdist, "./supp_tables/DEGsExpPat_due2CTdist_AP.csv")
+#write.csv(MeanGeneExpPerCT, "./supp_tables/MeanGeneExpPerCT_SC.csv")
+
+print("tested genes:")
+length(spearmanFDRs)
+print("Genes with true spatial pattern:")
+length(spearmanFDRs)-length(CTpredictableDEGs)
+print("Proportion of genes with true spatial pattern:")
+(length(spearmanFDRs)-length(CTpredictableDEGs))/length(spearmanFDRs)
+
+print("tested Olfrs:")
+length(grep("Olfr", names(spearmanFDRs)))
+print("Olfrs with true spatial pattern:")
+length(grep("Olfr", names(spearmanFDRs)))-length(grep("Olfr", CTpredictableDEGs))
+print("Proportion of Olfrs with true spatial pattern:")
+(length(grep("Olfr", names(spearmanFDRs)))-length(grep("Olfr", CTpredictableDEGs)))/length(grep("Olfr", names(spearmanFDRs)))
+
+c("Cnga2", "Omp", "Gnal") %in% rownames(DEGsbox)
+c("Cnga2", "Omp", "Gnal") %in% CTpredictableDEGs
+c("Cnga2", "Omp", "Gnal") %in% names(spearmanFDRs)
+```
+
+```{r exprPred_CTprops, echo=FALSE, message=FALSE, warning=FALSE}
+spearmanCoeffs<-matrix(NA, dim(DEGsbox)[1]-length(which(rownames(DEGsbox) %in% agGenes$genes)), dim(cellPropsNusvr)[2])
+spearmanPvals<-matrix(NA, dim(DEGsbox)[1]-length(which(rownames(DEGsbox) %in% agGenes$genes)), dim(cellPropsNusvr)[2])
+rownames(spearmanCoeffs)<-rownames(DEGsbox)[-which(rownames(DEGsbox) %in% agGenes$genes)]
+rownames(spearmanPvals)<-rownames(DEGsbox)[-which(rownames(DEGsbox) %in% agGenes$genes)]
+colnames(spearmanCoeffs)<-colnames(cellPropsNusvr)
+colnames(spearmanPvals)<-colnames(cellPropsNusvr)
+
+for(gene in rownames(DEGsbox)[-which(rownames(DEGsbox) %in% agGenes$genes)]){
+  tmp<-sapply(colnames(cellPropsNusvr), function(x){
+    cor.test(cellPropsNusvr[,x], norm_complete[gene,], method="spearman")
+  })
+  spearmanCoeffs[gene,]<-unlist(tmp[4,])
+  spearmanPvals[gene,]<-unlist(tmp[3,])
+}
+spearmanFDRs<-matrix(p.adjust(spearmanPvals, method = "fdr"), dim(spearmanPvals)[1], dim(spearmanPvals)[2])
+rownames(spearmanFDRs)<-rownames(spearmanPvals)
+colnames(spearmanFDRs)<-colnames(spearmanPvals)
+
+predictable<-apply(spearmanFDRs, 1, function(x){
+  sum(x<0.01)>0
+})
+
+CTpredictableDEGs<-rownames(spearmanFDRs)[predictable]
+#plotXYcorrelation(x=cellPropsNusvr[,"OSN"], y=log10(normalized[marker,]+1), main=c(paste("OSN proportions vs.", marker)), ylab=marker, xlab="OSN proportions", col=1)
+length(CTpredictableDEGs)/dim(spearmanFDRs)[1]
+
+## A few numbers
+print("tested genes:")
+dim(spearmanFDRs)[1]
+print("Genes with true spatial pattern:")
+dim(spearmanFDRs)[1]-length(CTpredictableDEGs)
+print("Proportion of genes with true spatial pattern:")
+(dim(spearmanFDRs)[1]-length(CTpredictableDEGs))/dim(spearmanFDRs)[1]
+
+print("tested Olfrs:")
+length(grep("Olfr", rownames(spearmanFDRs)))
+print("Olfrs with true spatial pattern:")
+length(grep("Olfr", rownames(spearmanFDRs)))-length(grep("Olfr", CTpredictableDEGs))
+print("Proportion of Olfrs with true spatial pattern:")
+(length(grep("Olfr", rownames(spearmanFDRs)))-length(grep("Olfr", CTpredictableDEGs)))/length(grep("Olfr", rownames(spearmanFDRs)))
+
+spearmanFDRs["Cnga2",]
+spearmanFDRs["Gnal",]
+#spearmanFDRs["Omp",]
+
+c("Cnga2", "Omp", "Gnal") %in% rownames(DEGsbox)
+```
+
+
+```{r FitDataAllGenes, echo=FALSE, message=FALSE, warning=FALSE}
+
+position<-as.numeric(colnames(logNormDEGs))
+logNormDEGs<-data.frame(position, t(logNormDEGs))
+
+fitted_data<-apply(logNormDEGs[,2:length(colnames(logNormDEGs))], 2, function(x){locfit(x~lp(logNormDEGs[,1], deg = 2, nn=1), data=logNormDEGs)})
+
+###### Analysis continues using normalized between 0 and 1 fitted(with predicted values if necessary) log10 rpm normalized data #####
+
+#deTaars<-fitted_data[grep("Taar", names(fitted_data))]
+deORs<-fitted_data
+deORs<-sapply(1:length(deORs), function(x){predict(deORs[[x]],  c(1:max(position)))})
+colnames(deORs)<-names(fitted_data)
+deORs<-t(deORs)
+deORs<-t(apply(deORs, 1, normBetween0and1))
+colnames(deORs)<-position
+
+DEORsboxDEORsMiy_venn<-venn.diagram(list(DEORsbox=gsub("\\.", "-", rownames(deORs)[grep("Olfr", rownames(deORs))]), DEORsMiy=ZoneIndexes$`modern gene name`), fill = c("red", "blue"), hyper.test = TRUE, total.population = length(union(gsub("\\.", "-", rownames(normalized)[grep("Olfr", rownames(normalized))]), ZoneIndexes$`modern gene name`)), lower.tail = FALSE, alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, cat.pos = c(-10,10), sub.cex = 1.5, filename = NULL, scaled=T)
+
+grid.draw(DEORsboxDEORsMiy_venn)
+
+```
+
+**Intersection between Miyamichi et al ORs and our DEORs**
+
+```{r MiyORsIntersect, echo=FALSE, message=FALSE, warning=FALSE}
+
+ORsboxDEORsMiy_venn<-venn.diagram(list(ORsbox=gsub("\\.", "-", rownames(normalized)[grep("Olfr", rownames(normalized))]), DEORsMiy=ZoneIndexes$`modern gene name`), fill = c("red", "blue"), hyper.test = TRUE, total.population = length(union(gsub("\\.", "-", rownames(normalized)[grep("Olfr", rownames(normalized))]), ZoneIndexes$`modern gene name`)), lower.tail = FALSE, alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, cat.pos = c(-10,10), sub.cex = 1.5, filename = NULL, scaled=T)
+
+grid.draw(ORsboxDEORsMiy_venn)
+```
+
+**Intersection between Miyamichi et al ORs and our detected ORs**
+
+##Clustering using all genes
+
+```{r DifferentiallyExpressed_ORs_ClusteringAlt, echo=FALSE, message=FALSE, warning=FALSE}
+#Clustering by fitted data from differentially expressed ORs 
+
+#Clustering
+
+test.dist<-as.dist(sqrt(0.5*((1-cor(t(deORs),method="spearman"))))) #define correlation distance matrix
+#estimate number of clusters with dynamicTreeCut
+cut2<-cutreeDynamic(hclust(test.dist, method="average"), distM=as.matrix(test.dist), 
+                    minClusterSize=100, method="hybrid",deepSplit = 0 )
+clusters_deORsMinCS100<-labels2colors(cut2) 
+if("white" %in% clusters_deORsMinCS100){
+  clusters_deORsMinCS100[clusters_deORsMinCS100=="white"]<-"skyblue4"
+}
+  
+names(clusters_deORsMinCS100)<-row.names(deORs)
+table(clusters_deORsMinCS100)
+
+table(clusters_deORsMinCS100[grep("Olfr", names(clusters_deORsMinCS100))])
+
+zoneCol<-clusters_deORsMinCS100
+zoneCol[-which(names(zoneCol) %in% ZoneIndexes$`modern gene name`)]<-NA
+
+ORsUmap<-umap(deORs)
+plot(ORsUmap$layout[,1], ORsUmap$layout[,2], col=alpha(clusters_deORsMinCS100, 0.3), pch=19, xlab="UMAP1", ylab="UMAP2")
+
+par(mfrow=c(3, 3))
+plotMeanPatternPerCluster(data=deORs, clusters=clusters_deORsMinCS100, ylim=c(0, 1), ylab="fitted norm. log10 mean expression", xlab="position AP")
+
+#get "zone indexes" for all ORs. This will be position of the expression peak (maximum) 
+ourIndexes<-apply(deORs, 1, function(x){which(x==max(x))})
+
+cluster2index<-clusters_deORsMinCS100[match(ZoneIndexes$`modern gene name`, names(clusters_deORsMinCS100))]
+cluster2index<-data.frame(ZoneIndexes, Cluster=cluster2index)
+cluster2index<-cluster2index[-which(is.na(cluster2index$Cluster)),]
+cluster2index<-data.frame(cluster2index, myIndx=ourIndexes[match(cluster2index$modern.gene.name, names(ourIndexes))])
+
+par(mfrow=c(1, 1))
+plot(x=cluster2index$myIndx, y=cluster2index$zone.index, col=alpha(cluster2index$Cluster, 0.3), xlab="our AP Indexes", ylab="Zone index by Miyamichi", pch=19)
+
+cor.test(as.numeric(cluster2index$myIndx), as.numeric(cluster2index$zone.index), method = "spearman")
+```
+
+**Plots with minCS=100**
+
+```{r DifferentiallyExpressed_ORs_ClusteringAlt2, echo=FALSE, message=FALSE, warning=FALSE}
+#Clustering by fitted data from differentially expressed ORs 
+
+#Clustering
+
+test.dist<-as.dist(sqrt(0.5*((1-cor(t(deORs),method="spearman"))))) #define correlation distance matrix
+#estimate number of clusters with dynamicTreeCut
+cut2<-cutreeDynamic(hclust(test.dist, method="average"), distM=as.matrix(test.dist), 
+                    minClusterSize=25, method="hybrid",deepSplit = 0 )
+clusters_deORsMinCS25<-labels2colors(cut2) 
+if("white" %in% clusters_deORsMinCS25){
+  clusters_deORsMinCS25[clusters_deORsMinCS25=="white"]<-"skyblue4"
+}
+  
+names(clusters_deORsMinCS25)<-row.names(deORs)
+table(clusters_deORsMinCS25)
+
+table(clusters_deORsMinCS25[grep("Olfr", names(clusters_deORsMinCS25))])
+
+zoneCol<-clusters_deORsMinCS25
+zoneCol[-which(names(zoneCol) %in% ZoneIndexes$`modern gene name`)]<-NA
+
+ORsUmap<-umap(deORs)
+plot(ORsUmap$layout[,1], ORsUmap$layout[,2], col=alpha(clusters_deORsMinCS25, 0.3), pch=19, xlab="UMAP1", ylab="UMAP2")
+
+par(mfrow=c(3, 3))
+plotMeanPatternPerCluster(data=deORs, clusters=clusters_deORsMinCS25, ylim=c(0, 1), ylab="fitted norm. log10 mean expression", xlab="position AP")
+
+#get "zone indexes" for all ORs. This will be position of the expression peak (maximum) 
+ourIndexes<-apply(deORs, 1, function(x){which(x==max(x))})
+
+cluster2index<-clusters_deORsMinCS25[match(ZoneIndexes$`modern gene name`, names(clusters_deORsMinCS25))]
+cluster2index<-data.frame(ZoneIndexes, Cluster=cluster2index)
+cluster2index<-cluster2index[-which(is.na(cluster2index$Cluster)),]
+cluster2index<-data.frame(cluster2index, myIndx=ourIndexes[match(cluster2index$modern.gene.name, names(ourIndexes))])
+
+par(mfrow=c(1, 1))
+plot(x=cluster2index$myIndx, y=cluster2index$zone.index, col=alpha(cluster2index$Cluster, 0.3), xlab="our AP Indexes", ylab="Zone index by Miyamichi", pch=19)
+
+cor.test(as.numeric(cluster2index$myIndx), as.numeric(cluster2index$zone.index), method = "spearman")
+```
+
+**Plots with minCS=25**
+
+
+```{r DifferentiallyExpressed_ORs_Clustering, echo=FALSE, message=FALSE, warning=FALSE}
+#Clustering by fitted data from differentially expressed ORs 
+
+#Clustering
+
+test.dist<-as.dist(sqrt(0.5*((1-cor(t(deORs),method="spearman"))))) #define correlation distance matrix
+#estimate number of clusters with dynamicTreeCut
+cut2<-cutreeDynamic(hclust(test.dist, method="average"), distM=as.matrix(test.dist), 
+                    minClusterSize=50, method="hybrid",deepSplit = 0 )
+clusters_deORs<-labels2colors(cut2) 
+if("white" %in% clusters_deORs){
+  clusters_deORs[clusters_deORs=="white"]<-"skyblue4"
+}
+  
+names(clusters_deORs)<-row.names(deORs)
+table(clusters_deORs)
+
+table(clusters_deORs[grep("Olfr", names(clusters_deORs))])
+
+dframe<-data.frame(olfr=names(clusters_deORs), cluster=clusters_deORs)
+#write.csv(dframe, "./clusters_deORsAP.csv")
+
+table(clusters_deORs[extraDEGs$x])
+```
+
+
+```{r Visualize_clusters_DEGs_tSNE, echo=FALSE, message=FALSE, warning=FALSE}
+
+#Get colors only for ORs studied in Miyamichi et al 2005
+zoneCol<-clusters_deORs
+zoneCol[-which(names(zoneCol) %in% ZoneIndexes$`modern gene name`)]<-NA
+
+ORcols<-clusters_deORs
+ORcols[-grep("Olfr", names(ORcols))]<-NA
+
+classCol<-ORcols
+classCol[which(!is.na(classCol))]<-"blue"
+classCol[names(classCol) %in% Class1[,1]]<-"red"
+
+extraDEGscol<-rep("black", length(clusters_deORs))
+extraDEGscol[which(names(clusters_deORs) %in% extraDEGs$x)]<-"green"
+
+#visualize data with tsne
+set.seed(10)
+test.tsne<-Rtsne(test.dist, is_distance = T)
+plot(test.tsne$Y, col=alpha(clusters_deORs, 0.3), pch=19, xlab="tSNE1", ylab="tSNE2")
+
+plot(test.tsne$Y, col=alpha(ORcols, 0.3), pch=19, xlab="tSNE1", ylab="tSNE2")
+
+plot(test.tsne$Y, col=alpha(zoneCol, 0.3), pch=19, xlab="tSNE1", ylab="tSNE2")
+
+plot(test.tsne$Y, col=alpha(classCol, 0.3), pch=19, xlab="tSNE1", ylab="tSNE2")
+```
+
+**DEGs tSNE, ORs tSNE, and ORs studied by Miyamichi et al tSNE, and class 1 ORs tSNE**
+
+```{r Visualize_clusters_DEGs_UMAP, echo=FALSE, message=FALSE, warning=FALSE}
+nGenesPerClust<-table(clusters_deORs)
+write.csv(nGenesPerClust, "./supp_tables/nGenesPerClust_AP.csv")
+
+ORsUmap<-umap(deORs) #normalized Differentially Expressed OR genes
+pdf(file = "./figures_pdf2/Fig2C.1.pdf", width=5, height = 5)
+plot(ORsUmap$layout[,1], ORsUmap$layout[,2], col=alpha(clusters_deORs, 0.3), pch=19, xlab="UMAP1", ylab="UMAP2")
+dev.off()
+
+cairo_ps("./figures_pdf2/Fig2C.1.eps", width = 5, height = 5)
+plot(ORsUmap$layout[,1], ORsUmap$layout[,2], col=alpha(clusters_deORs, 0.3), pch=19, xlab="UMAP1", ylab="UMAP2")
+dev.off()
+
+pdf(file = "./figures_pdf2/FigS4A_AP.1.pdf", width=5, height = 5)
+plot(ORsUmap$layout[,1], ORsUmap$layout[,2], col=alpha(ORcols, 0.3), pch=19, xlab="UMAP1", ylab="UMAP2")
+dev.off()
+
+cairo_ps("./figures_pdf2/FigS4A_AP.1.eps", width = 5, height = 5)
+plot(ORsUmap$layout[,1], ORsUmap$layout[,2], col=alpha(ORcols, 0.3), pch=19, xlab="UMAP1", ylab="UMAP2")
+dev.off()
+
+plot(ORsUmap$layout[,1], ORsUmap$layout[,2], col=alpha(zoneCol, 0.3), pch=19, xlab="UMAP1", ylab="UMAP2")
+
+pdf(file = "./figures_pdf2/FigS4A_AP.2.pdf", width=5, height = 5)
+plot(ORsUmap$layout[,1], ORsUmap$layout[,2], col=alpha(classCol, 0.3), pch=19, xlab="UMAP1", ylab="UMAP2")
+legend("topleft", c("Class 1", "Class 2"), pch=19, col=alpha(c("red", "blue"), 0.3))
+dev.off()
+
+cairo_ps("./figures_pdf2/FigS4A_AP.2.eps", width = 5, height = 5)
+plot(ORsUmap$layout[,1], ORsUmap$layout[,2], col=alpha(classCol, 0.3), pch=19, xlab="UMAP1", ylab="UMAP2")
+legend("topleft", c("Class 1", "Class 2"), pch=19, col=alpha(c("red", "blue"), 0.3))
+dev.off()
+
+pdf(file = "./figures_pdf2/FigS2C.pdf", width=5, height = 5)
+plot(ORsUmap$layout[,1], ORsUmap$layout[,2], col=alpha(extraDEGscol, 0.3), pch=19, xlab="UMAP1", ylab="UMAP2")
+legend("bottomright", c("AP exclusive"), pch=19, col=alpha(c("green"), 0.3))
+dev.off()
+
+cairo_ps("./figures_pdf2/FigS2C.eps", width = 5, height = 5)
+plot(ORsUmap$layout[,1], ORsUmap$layout[,2], col=alpha(extraDEGscol, 0.3), pch=19, xlab="UMAP1", ylab="UMAP2")
+legend("topleft", c("not AP exclusive", "AP exclusive"), pch=19, col=alpha(c("black", "green"), 0.3))
+dev.off()
+```
+
+**DEGs UMAP, ORs UMAP, and ORs studied by Miyamichi et al UMAP, and class 1 ORs UMAP**
+
+```{r DEGsDiffmap, echo=FALSE, message=FALSE, warning=FALSE}
+ORsDiffmap<-DiffusionMap(deORs, distance ="rankcor") #normalized Differentially Expressed OR genes
+
+#fit<-principal_curve(cbind(ORsDiffmap$DC1, ORsDiffmap$DC2), smoother = "lowess", stretch = 2) 
+#plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(clusters_deORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+#lines(fit, col="red")
+
+#fit<-principal_curve(cbind(ORsDiffmap$DC1, ORsDiffmap$DC2), stretch = 2) 
+#plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(clusters_deORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+#lines(fit, col="red")
+
+#fit<-principal_curve(cbind(ORsDiffmap$DC1, ORsDiffmap$DC2), smoother = "periodic_lowess", stretch = 2) #periodic_lowess to allow fitting a circle, stretch to avoid points bunching at the end of the curve
+#plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(clusters_deORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+#lines(fit, col="red")
+
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(clusters_deORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(classCol, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(ORcols, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(zoneCol, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+#projection<-project_to_curve(cbind(ORsDiffmap$DC1, ORsDiffmap$DC2), fit$s)
+#plot(projection$s, col=alpha(clusters_deORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+dpt <- DPT(ORsDiffmap, tips=which(names(clusters_deORs)=="Olfr878")) #pseudotime
+
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(plot.DPT(dpt)$data$ColourExpl, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+#plot.DPT(dpt)
+
+pseudotime<-plot.DPT(dpt)$data$Colour
+names(pseudotime)<-rownames(deORs)
+
+#identify first gene in diffmap from magenta cluster
+#clusters_deORs[which(ORsDiffmap$DC1==min(ORsDiffmap$DC1[which(clusters_deORs=="magenta" & ORsDiffmap$DC1<0.01 & ORsDiffmap$DC1>0 & ORsDiffmap$DC2<(-0.02))]))]
+#Olfr1102
+
+#identify first gene in DCs projection from yellow cluster
+#clusters_deORs[which(projection$s[,1]==max(projection$s[,1][which(clusters_deORs=="yellow" & projection$s[,1]>0 & projection$s[,2]<(-0.02))]))]
+#Lrrc36 
+
+#most anterior Zone 1 OR in Miyamichi paper
+#cluster2index[cluster2index$myIndx==1,]
+#Olfr878
+```
+
+**DEGs DiffMAP, ORs DiffMAP, and ORs studied by Miyamichi et al DiffMAP, class 1 ORs DiffMAP, DPT diffmap**
+
+```{r Pattern_perCluster_DEGs, echo=FALSE, message=FALSE, warning=FALSE}
+
+#Expression patterns per cluster
+pdf(file = "./figures_pdf2/Fig2C.2.pdf", width=5, height = 5)
+par(mfrow=c(3, 3))
+plotMeanPatternPerCluster(data=deORs, clusters=clusters_deORs, ylim=c(0, 1), ylab="fitted norm. log10 mean expression", xlab="position AP")
+dev.off()
+
+```
+
+**Pattern per cluster of DEGs**
+
+```{r myIndexesDEGs, echo=FALSE, message=FALSE, warning=FALSE}
+#get "zone indexes" for all ORs. This will be weighted averages of positions: weights=expression values 
+#ourIndexes<-apply(deORs, 1, function(x){weighted.mean(1:max(position), w=x)})
+
+#get "zone indexes" for all ORs. This will be position of the expression peak (maximum) 
+ourIndexes<-apply(deORs, 1, function(x){which(x==max(x))})
+```
+
+```{r jitterplotFGHfgh, echo=FALSE, message=FALSE, warning=FALSE}
+
+cluster2index<-clusters_deORs[match(ZoneIndexes$`modern gene name`, names(clusters_deORs))]
+cluster2index<-data.frame(ZoneIndexes, Cluster=cluster2index)
+cluster2index<-cluster2index[-which(is.na(cluster2index$Cluster)),]
+cluster2index<-data.frame(cluster2index, myIndx=ourIndexes[match(cluster2index$modern.gene.name, names(ourIndexes))])
+
+#clustsMaxPos<-getMaxPositionPerCluster(data=deORs, clusters = clusters_deORs)
+
+#spClusterNo<-rep(1, dim(cluster2index)[1])
+#i=1
+#for(cluster in names(sort(clustsMaxPos))){
+#  spClusterNo[which(cluster2index$Cluster==cluster)]<-i
+#  i<-i+1
+#}
+
+#spClusterMaxPos<-rep(1, dim(cluster2index)[1])
+#i=1
+#for(cluster in names(sort(clustsMaxPos))){
+#  spClusterMaxPos[which(cluster2index$Cluster==cluster)]<-clustsMaxPos[cluster]
+#  i<-i+1
+#}
+
+#cluster2index<-data.frame(cluster2index, spClusterNo, spClusterMaxPos)
+
+#plotClusterJitter(x=cluster2index$spClusterNo, y=cluster2index$zone.index, xlabels=unique(cluster2index$Cluster[order(cluster2index$spClusterNo)]), col=cluster2index$Cluster, xlab="spatial expression cluster", ylab="Zone index")
+plot(x=cluster2index$myIndx, y=cluster2index$zone.index, col=alpha(cluster2index$Cluster, 0.3), xlab="our AP Indexes", ylab="Zone index by Miyamichi", pch=19)
+
+
+#cor.test(as.numeric(cluster2index$zone.index), cluster2index$spClusterMaxPos, method = "spearman")
+
+cor.test(as.numeric(cluster2index$myIndx), as.numeric(cluster2index$zone.index), method = "spearman")
+
+#plotClusterJitter(x=cluster2index$spClusterNo, y=cluster2index$spClusterMaxPos, xlabels=unique(cluster2index$Cluster[order(cluster2index$spClusterNo)]), col=cluster2index$Cluster, xlab="spatial expression cluster", ylab="Zone index")
+```
+
+**Figure 18** Zone indexes per spatial expression cluster
+
+
+```{r DEGsjitterplotDPT, echo=FALSE, message=FALSE, warning=FALSE}
+cluster2dpt<-clusters_deORs[match(ZoneIndexes$`modern gene name`, names(clusters_deORs))]
+cluster2dpt<-data.frame(ZoneIndexes, Cluster=cluster2dpt)
+cluster2dpt<-cluster2dpt[-which(is.na(cluster2dpt$Cluster)),]
+cluster2dpt<-data.frame(cluster2dpt, myIndx=pseudotime[match(cluster2dpt$modern.gene.name, names(pseudotime))])
+
+plot(x=cluster2dpt$myIndx, y=cluster2dpt$zone.index, col=alpha(cluster2dpt$Cluster, 0.3), xlab="Indexes by DPT", ylab="Zone index by Miyamichi", pch=19)
+
+cor.test(as.numeric(cluster2dpt$myIndx), as.numeric(cluster2dpt$zone.index), method = "spearman")
+```
+
+**Figure 18** DPT Zone indexes per spatial expression cluster
+
+```{r DEGsDiffmapAlt, echo=FALSE, message=FALSE, warning=FALSE}
+ORsDiffmap<-DiffusionMap(deORs[grep("Olfr", rownames(deORs)),], distance ="rankcor")
+clusters_DEORs<-clusters_deORs[grep("Olfr", rownames(deORs))]
+ORcolsM<-ORcols[grep("Olfr", rownames(deORs))]
+ORsClassCol<-classCol[grep("Olfr", rownames(deORs))]
+ORsZoneCol<-zoneCol[grep("Olfr", rownames(deORs))]
+#normalized Differentially Expressed OR genes
+
+#ORsDiffmap<-DiffusionMap(data.frame(names(test.dist)), distance =test.dist) #normalized Differentially Expressed OR genes
+
+#fit<-principal_curve(cbind(ORsDiffmap$DC1, ORsDiffmap$DC2), smoother = "lowess", stretch = 2) 
+#plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(clusters_deORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+#lines(fit, col="red")
+
+#fit<-principal_curve(cbind(ORsDiffmap$DC1, ORsDiffmap$DC2), stretch = 2) 
+#plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(clusters_deORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+#lines(fit, col="red")
+
+#fit<-principal_curve(cbind(ORsDiffmap$DC1, ORsDiffmap$DC2), smoother = "periodic_lowess", stretch = 2) #periodic_lowess to allow fitting a circle, stretch to avoid points bunching at the end of the curve
+#plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(clusters_DEORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+#lines(fit, col="red")
+
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(clusters_DEORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(classCol, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(ORcolsM, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(ORsZoneCol, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+#projection<-project_to_curve(cbind(ORsDiffmap$DC1, ORsDiffmap$DC2), fit$s)
+#plot(projection$s, col=alpha(clusters_DEORs, 0.3), pch=19, xlab="DC1", ylab="DC2")
+
+#dpt <- DPT(ORsDiffmap, tips=which(names(clusters_DEORs)=="Olfr878")) #pseudotime
+dpt <- DPT(ORsDiffmap, tips=1) #pseudotime
+
+pdf(file = "./figures_pdf2/FigS4A_AP.3.pdf", width=5, height = 5)
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(plot.DPT(dpt)$data$ColourExpl, 0.3), pch=19, xlab="DC1", ylab="DC2")
+dev.off()
+
+cairo_ps("./figures_pdf2/FigS4A_AP.3.eps", width = 5, height = 5)
+plot(ORsDiffmap$DC1, ORsDiffmap$DC2, col=alpha(plot.DPT(dpt)$data$ColourExpl, 0.3), pch=19, xlab="DC1", ylab="DC2")
+dev.off()
+#plot.DPT(dpt)
+
+pseudotime<-plot.DPT(dpt)$data$Colour
+names(pseudotime)<-rownames(deORs)[grep("Olfr", rownames(deORs))]
+
+#identify first gene in diffmap from magenta cluster
+#clusters_deORs[which(ORsDiffmap$DC1==min(ORsDiffmap$DC1[which(clusters_deORs=="magenta" & ORsDiffmap$DC1<0.01 & ORsDiffmap$DC1>0 & ORsDiffmap$DC2<(-0.02))]))]
+#Olfr1102
+
+#identify first gene in DCs projection from magenta cluster
+#clusters_deORs[which(projection$s[,1]==max(projection$s[,1][which(clusters_deORs=="magenta" & projection$s[,1]<0 & projection$s[,2]>0.02)]))]
+#Olfr935
+
+#most dorsal OR in Miyamichi paper
+#cluster2index[cluster2index$myIndx==1,]
+#Olfr372
+```
+
+**DEGs DiffMAP, ORs DiffMAP, and ORs studied by Miyamichi et al DiffMAP, class 1 ORs DiffMAP, DPT diffmap**
+
+```{r DEGsjitterplotDPTalt, echo=FALSE, message=FALSE, warning=FALSE}
+cluster2dpt<-clusters_deORs[match(ZoneIndexes$`modern gene name`, names(clusters_deORs))]
+cluster2dpt<-data.frame(ZoneIndexes, Cluster=cluster2dpt)
+cluster2dpt<-cluster2dpt[-which(is.na(cluster2dpt$Cluster)),]
+cluster2dpt<-data.frame(cluster2dpt, myIndx=pseudotime[match(cluster2dpt$modern.gene.name, names(pseudotime))])
+
+pdf(file = "./figures_pdf2/FigS4A_AP.4.pdf", width=5, height = 5)
+plot(x=cluster2dpt$myIndx, y=cluster2dpt$zone.index, col=alpha(cluster2dpt$Cluster, 0.3), xlab="Indexes by DPT", ylab="Zone index by Miyamichi", pch=19)
+dev.off()
+
+cairo_ps("./figures_pdf2/FigS4A_AP.4.eps", width = 5, height = 5)
+plot(x=cluster2dpt$myIndx, y=cluster2dpt$zone.index, col=alpha(cluster2dpt$Cluster, 0.3), xlab="Indexes by DPT", ylab="Zone index by Miyamichi", pch=19)
+dev.off()
+
+cor.test(as.numeric(cluster2dpt$myIndx), as.numeric(cluster2dpt$zone.index), method = "spearman")
+```
+
+**Figure 18** DPT Zone indexes per spatial expression cluster
+
+```{r dfgj}
+#Pseudotime indexes
+ORDPTindexes<-pseudotime[match(DEGsfile$Gene.name, names(pseudotime))]
+names(ORDPTindexes)<-DEGsfile$Gene.name
+#Convert pseudotime indexes to Miyamichi indexes
+ORDPTindexes4pred<-data.frame(myIndx=ORDPTindexes)
+#mod<-lm(zone.index ~ myIndx, data=cluster2dpt)
+
+cluster2dpt$zone.index<-as.numeric(cluster2dpt$zone.index)
+library(gam)
+mod<-gam(zone.index ~ s(myIndx), data=cluster2dpt)
+summary(mod)
+ORMiyIndexes<-predict(mod, data.frame(ORDPTindexes4pred))
+
+DEGsfile<-cbind(DEGsfile, clustersMinCS25=clusters_deORsMinCS25, clustersMinCS50=clusters_deORs, clustersMinCS100=clusters_deORsMinCS100, ORDPTindexes, ORMiyIndexes)
+write.csv(DEGsfile, "./supp_tables/newAPDEGs.autocor.binMatFDR0.01filt_G99.csv")
+
+DEGsfile<-read.csv("./supp_tables/newAPDEGs.autocor.binMatFDR0.01filt_G99.csv")[,-1]
+neuroActMks_Up<-c("Cnga2", "Cyp26b1", "Dlg2", "Epha5", "Etv5", "Fos", "Gpr158", "Kirrel2", "Lrrc3b", "Nphs1", "Nrp1", "Nxph3", "Pcdh10", "Pcp4l1", "Plxna3", "Ptchd1", "Ptprn", "Rasgrp4", "S100a5", "Sema3e", "Sema7a", "Slc8a1", "Slc17a6", "Snca", "Syt4")
+is.APdeg<-sapply(neuroActMks_Up, function(x){x %in% DEGsfile$Gene.name})
+APclust<-as.character(sapply(neuroActMks_Up, function(x){DEGsfile$clustersMinCS50[which(DEGsfile$Gene.name==x)]}))
+
+neuroActMks_Up<-data.frame(neuroActMks_Up, is.APdeg, APclust)
+write.csv(neuroActMks_Up, "./supp_tables/neuroActMks_Up_AP.csv")
+
+neuroActMks_Down<-c("Bace1", "Calb2", "Cdh15", "Chil3", "Efna5", "Entpd2", "Etv3", "Kirrel3", "Ppp3ca", "Rims3")
+is.APdeg<-sapply(neuroActMks_Down, function(x){x %in% DEGsfile$Gene.name})
+APclust<-as.character(sapply(neuroActMks_Down, function(x){DEGsfile$clustersMinCS50[which(DEGsfile$Gene.name==x)]}))
+
+neuroActMks_Down<-data.frame(neuroActMks_Down, is.APdeg, APclust)
+write.csv(neuroActMks_Down, "./supp_tables/neuroActMks_Down_AP.csv")
+
+```
+
+##Genomic clustering
+
+```{r Association_Pattern-GenPositionDEGs, message=FALSE, warning=FALSE}
+#Test if there is an association between genes' position in the genome and their spatial expresssion pattern
+#add Miyamichi indexes (including predicted ones) to ORs data table
+ORs_data$index<-pseudotime[match(ORs_data$Gene.name, names(pseudotime))]
+#ORs_data$index<-ORMiyIndexes[match(ORs_data$Gene.name, names(ORMiyIndexes))]
+ORs_data$clusters<-clusters_deORs[match(ORs_data$Gene.name, names(clusters_deORs))]
+
+#Add norm. distance to genomic cluster start and end 
+ORs_data$dist2genClustStart<-sapply(1:dim(ORs_data)[1], function(x){min(c(abs(ORs_data$Gene.start..bp.[x]-ORs_data$start[x]), abs(ORs_data$Gene.end..bp.[x]-ORs_data$start[x])))/ORs_data$Length.of.cluster[x]})
+
+ORs_data$dist2genClustEnd<-sapply(1:dim(ORs_data)[1], function(x){min(c(abs(ORs_data$end[x]-ORs_data$Gene.start..bp.[x]), abs(ORs_data$end[x]-ORs_data$Gene.end..bp.[x])))/ORs_data$Length.of.cluster[x]})
+
+deORs_data<-ORs_data[match(rownames(deORs), ORs_data$Gene.name),]
+deORs_data<-deORs_data[-grep("NA", rownames(deORs_data)),]
+
+plotGenesFromCluster(data=deORs_data, cluster="blue", clustersColName="clusters", chromosomesColName="Chromosome.scaffold.name", startPosColName="Gene.start..bp.", endPosColName="Gene.end..bp.", genome="mm10", main="Blue cluster ORs positions in chromosomes")
+
+tbl<-table(deORs_data$gen_clust, deORs_data$clusters)
+tbl
+
+chisq.test(tbl)
+chisq.test(tbl, simulate.p.value = TRUE)
+```
+
+**Table 3.** Number of genes per spatial expression cluster in each genomic cluster. (Columns=Spatial pattern clusters, Rows=Genomic clusters)
+
+
+```{r PatternDistvsGenDistORs, echo=FALSE, message=FALSE, warning=FALSE}
+DEORsfile<-DEGsfile[grep("Olfr", DEGsfile$Gene.name),]
+DEORs<-deORs[grep("Olfr", DEGsfile$Gene.name),]
+
+#Patterns Distance
+
+#for(i in unique(DEORsfile$Chromosome.scaffold.name)){
+#  cor.mat<-cor(t(DEORs[which(DEORsfile$Chromosome.scaffold.name==i),]),method="spearman")
+#  assign(paste("PatternDistChr.", i, sep="") ,sqrt(0.5*((1-cor.mat))))
+#}
+
+#DPT index distance
+
+for(i in unique(DEORsfile$Chromosome.scaffold.name)){
+  if(length(which(DEORsfile$Chromosome.scaffold.name==i))>1){
+    patDist.mat<-sapply(which(DEORsfile$Chromosome.scaffold.name==i), function(x){abs(DEORsfile$ORDPTindexes[x]-DEORsfile$ORDPTindexes[which(DEORsfile$Chromosome.scaffold.name==i)])})
+    rownames(patDist.mat)<-DEORsfile$Gene.name[which(DEORsfile$Chromosome.scaffold.name==i)]
+    colnames(patDist.mat)<-DEORsfile$Gene.name[which(DEORsfile$Chromosome.scaffold.name==i)]
+    assign(paste("PatternDistChr.", i, sep=""), patDist.mat)
+  }
+}
+
+
+#Genomic distance
+for(i in unique(DEORsfile$Chromosome.scaffold.name)){
+  if(length(which(DEORsfile$Chromosome.scaffold.name==i))>1){
+    genDist.mat<-sapply(which(DEORsfile$Chromosome.scaffold.name==i), function(x){abs(DEORsfile$Gene.start..bp.[x]-DEORsfile$Gene.start..bp.[which(DEORsfile$Chromosome.scaffold.name==i)])})
+    rownames(genDist.mat)<-DEORsfile$Gene.name[which(DEORsfile$Chromosome.scaffold.name==i)]
+    colnames(genDist.mat)<-DEORsfile$Gene.name[which(DEORsfile$Chromosome.scaffold.name==i)]
+    assign(paste("GenDistChr.", i, sep=""), genDist.mat)
+  }
+}
+
+GenDist<-vector()
+PatternDist<-vector()
+for(i in 1:length(ls(patt="GenDistChr"))){
+  GenDist<-c(GenDist, get(ls(patt="GenDistChr")[i]))
+  PatternDist<-c(PatternDist, get(ls(patt="PatternDistChr")[i]))
+}
+
+log10GenDist<-log10(GenDist+1)
+
+meansLog10GenDist<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){mean(log10GenDist[log10GenDist>=x&log10GenDist<(x+0.5)])})
+meansLog10PattDist<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){mean(PatternDist[log10GenDist>=x&log10GenDist<(x+0.5)], na.rm=T)})
+sdLog10PattDist<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){sd(PatternDist[log10GenDist>=x&log10GenDist<(x+0.5)], na.rm=T)})
+seLog10PattDist<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){std(PatternDist[log10GenDist>=x&log10GenDist<(x+0.5)])})
+groupSizes<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){length(log10GenDist[log10GenDist>=x&log10GenDist<(x+0.5)])})
+
+meansLog10GenDist<-meansLog10GenDist[-c(1, which(groupSizes<10))]
+meansLog10PattDist<-meansLog10PattDist[-c(1, which(groupSizes<10))]
+sdLog10PattDist<-sdLog10PattDist[-c(1, which(groupSizes<10))]
+seLog10PattDist<-seLog10PattDist[-c(1, which(groupSizes<10))]
+groupSizes<-groupSizes[-c(1, which(groupSizes<10))]
+
+cor.test(meansLog10GenDist, meansLog10PattDist, method = "spearman")
+
+#plot(meansLog10GenDist, meansLog10PattDist, ylim=c(0, 1), xlim=c(0, 8.5), pch=19, xlab="log10(Genomic Distance)", ylab="Pattern Distance")
+pdf(file = "./figures_pdf2/FigS4C_AP.pdf", width=5, height = 5)
+plot(meansLog10GenDist, meansLog10PattDist, ylim=c(0, max(meansLog10PattDist)+150), xlim=c(0, 8.5), pch=19, xlab="log10(Genomic Distance)", ylab="Pattern Distance")
+arrows(meansLog10GenDist, meansLog10PattDist-sdLog10PattDist, meansLog10GenDist, meansLog10PattDist+sdLog10PattDist, length=0.05, angle=90, code=3)
+set.seed(10)
+abline(h=mean(sample(PatternDist, 500), na.rm=T))
+dev.off()
+
+cairo_ps("./figures_pdf2/FigS4C_AP.eps", width = 5, height = 5)
+plot(meansLog10GenDist, meansLog10PattDist, ylim=c(0, max(meansLog10PattDist)+150), xlim=c(0, 8.5), pch=19, xlab="log10(Genomic Distance)", ylab="Pattern Distance")
+arrows(meansLog10GenDist, meansLog10PattDist-sdLog10PattDist, meansLog10GenDist, meansLog10PattDist+sdLog10PattDist, length=0.05, angle=90, code=3)
+set.seed(10)
+abline(h=mean(sample(PatternDist, 500), na.rm=T))
+dev.off()
+```
+
+**Chemical senses plot DEORs**
+
+```{r PatternDistvsGenDist, echo=FALSE, message=FALSE, warning=FALSE}
+#Patterns Distance
+for(i in unique(DEGsfile$Chromosome.scaffold.name)){
+  cor.mat<-cor(t(deORs[which(DEGsfile$Chromosome.scaffold.name==i),]),method="spearman")
+  assign(paste("PatternDistChr.", i, sep="") ,sqrt(0.5*((1-cor.mat))))
+}
+
+#Genomic distance
+for(i in unique(DEGsfile$Chromosome.scaffold.name)){
+  if(length(which(DEGsfile$Chromosome.scaffold.name==i))>1){
+    genDist.mat<-sapply(which(DEGsfile$Chromosome.scaffold.name==i), function(x){abs(DEGsfile$Gene.start..bp.[x]-DEGsfile$Gene.start..bp.[which(DEGsfile$Chromosome.scaffold.name==i)])})
+    rownames(genDist.mat)<-DEGsfile$Gene.name[which(DEGsfile$Chromosome.scaffold.name==i)]
+    colnames(genDist.mat)<-DEGsfile$Gene.name[which(DEGsfile$Chromosome.scaffold.name==i)]
+    assign(paste("GenDistChr.", i, sep=""), genDist.mat)
+  }
+}
+
+GenDist<-vector()
+PatternDist<-vector()
+for(i in 1:length(ls(patt="GenDistChr"))){
+  GenDist<-c(GenDist, get(ls(patt="GenDistChr")[i]))
+  PatternDist<-c(PatternDist, get(ls(patt="PatternDistChr")[i]))
+}
+
+log10GenDist<-log10(GenDist+1)
+
+meansLog10GenDist<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){mean(log10GenDist[log10GenDist>=x&log10GenDist<(x+0.5)])})
+meansLog10PattDist<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){mean(PatternDist[log10GenDist>=x&log10GenDist<(x+0.5)], na.rm=T)})
+sdLog10PattDist<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){sd(PatternDist[log10GenDist>=x&log10GenDist<(x+0.5)], na.rm=T)})
+seLog10PattDist<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){std(PatternDist[log10GenDist>=x&log10GenDist<(x+0.5)])})
+groupSizes<-sapply(seq(0, ceiling(max(log10GenDist)), by=0.5), function(x){length(log10GenDist[log10GenDist>=x&log10GenDist<(x+0.5)])})
+
+meansLog10GenDist<-meansLog10GenDist[-c(1, which(groupSizes<10))]
+meansLog10PattDist<-meansLog10PattDist[-c(1, which(groupSizes<10))]
+sdLog10PattDist<-sdLog10PattDist[-c(1, which(groupSizes<10))]
+seLog10PattDist<-seLog10PattDist[-c(1, which(groupSizes<10))]
+groupSizes<-groupSizes[-c(1, which(groupSizes<10))]
+
+plot(meansLog10GenDist, meansLog10PattDist, ylim=c(0, 1), xlim=c(0, 8.5), pch=19, xlab="log10(Genomic Distance)", ylab="Pattern Distance")
+arrows(meansLog10GenDist, meansLog10PattDist-sdLog10PattDist, meansLog10GenDist, meansLog10PattDist+sdLog10PattDist, length=0.05, angle=90, code=3)
+set.seed(10)
+abline(h=mean(sample(PatternDist, 500), na.rm=T))
+
+```
+
+**Chemical senses plot DEGs**
+
+```{r RFpredictLowORs}
+#Eliminate redundant predictors
+deORs_dataRF<-deORs_data[,-which(colnames(deORs_data)=="clusters")]
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="Greek.Islands")]
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="Gene.stable.ID")]
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="chromosome")]
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="islandChr")]
+
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="Greek.Island.composite.score")]
+
+NArows<-apply(deORs_dataRF, 1, function(x){length(which(is.na(x)))})
+#deORs_dataRF<-deORs_dataRF[-which(NArows>0),]
+
+deORs_dataRF$dist2ClosestIsland<-as.numeric(deORs_dataRF$dist2ClosestIsland)
+deORs_dataRF$Chromosome.scaffold.name<-as.factor(deORs_dataRF$Chromosome.scaffold.name)
+deORs_dataRF$gen_clust<-as.factor(deORs_dataRF$gen_clust)
+deORs_dataRF$closestIsland<-as.factor(deORs_dataRF$closestIsland)
+deORs_dataRF$mOSN.Ebf.<-as.factor(deORs_dataRF$mOSN.Ebf.)
+deORs_dataRF$mOSN.Lhx2.<-as.factor(deORs_dataRF$mOSN.Lhx2.)
+deORs_dataRF$mOSN.H3K9me3.<-as.factor(deORs_dataRF$mOSN.H3K9me3.)
+deORs_dataRF$Within.500bp.of.OR.TSS.<-as.factor(deORs_dataRF$Within.500bp.of.OR.TSS.)
+
+rownames(deORs_dataRF)<-deORs_dataRF$Gene.name
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="Gene.name")]
+
+
+#predictorsClass<-apply(deORs_dataRF, 2, class)
+#deORs_dataRF[,which(predictorsClass=="character")]<-apply(deORs_dataRF[,which(predictorsClass=="character")], 2, as.factor)
+
+#for(i in 1:dim(deORs_dataRF)[2]){
+# print(class(deORs_dataRF[,i]))
+#}
+
+#weight<-sapply(deORs_dataRF$clusters, function(x){1/length(which(deORs_dataRF$clusters==x))})
+#deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="clusters")]
+
+indexRFprediction<-function(data4prediction, PredictorsSelection, trainDataFraction, predictedCol){
+  #data4prediction=data frame of predictors with rows=elements which patterns are analysed and columns=values for predictors, PredictorsSelection=character vector of set of predictors that will be used for prediction, trainDataFraction=fraction of the spacePatterns that will be used for training, predictedCol="index"
+  
+  #indexPredict<-data4prediction[-which(is.na(rowSums(data4prediction))),]
+  indexPredict<-data4prediction[c(PredictorsSelection, predictedCol)]
+  
+  set.seed(10)
+  sample = sample.split(indexPredict[,1], SplitRatio = trainDataFraction)
+  test  = subset(indexPredict, sample == FALSE)
+
+  real = data4prediction[rownames(test),predictedCol]
+  
+  train = subset(indexPredict, sample == TRUE)
+  
+  test  = subset(indexPredict, sample == FALSE)
+  
+  rf <- randomForest(
+    index ~ .,
+    data=train, na.action = na.omit
+  )
+  predicted<-predict(rf, newdata=test[,-which(colnames(test)==predictedCol)])
+  importance<-importance(rf)
+  return(list(predicted, real, importance, rf))
+}
+
+sel_predictors<-colnames(deORs_dataRF)[-which(colnames(deORs_dataRF)=="gen_clust")]
+sel_predictors<-sel_predictors[-which(sel_predictors=="closestIsland")]
+sel_predictors<-sel_predictors[-which(sel_predictors=="index")]
+
+rfModel<-indexRFprediction(data4prediction=deORs_dataRF, PredictorsSelection=sel_predictors, trainDataFraction=0.75, predictedCol = "index")
+
+predictedRandomTraining=rfModel[[1]]
+real=rfModel[[2]]
+importance=rfModel[[3]]
+rfModel[[4]]
+
+```
+
+```{r, RFplots}
+
+plotXYcorrelation(x=real, y=predictedRandomTraining, xlab = "real indexes", ylab="predicted indexes", col=1, main="RF predictions for OR AP indexes")
+par(mar=c(8, 5, 5, 5))
+barplot(rev(sort(importance[,1]))[1:10], las=2, main="predictors importance", ylab="value", cex.names = 0.6)
+```
+
+**RF plots**
+
+```{r RFpredictLowORsWMiyInd}
+
+#Eliminate redundant predictors
+ORs_dataRF<-ORs_data[,-which(colnames(ORs_data)=="clusters")]
+ORs_dataRF<-ORs_dataRF[,-which(colnames(ORs_dataRF)=="Greek.Islands")]
+ORs_dataRF<-ORs_dataRF[,-which(colnames(ORs_dataRF)=="Gene.stable.ID")]
+ORs_dataRF<-ORs_dataRF[,-which(colnames(ORs_dataRF)=="chromosome")]
+ORs_dataRF<-ORs_dataRF[,-which(colnames(ORs_dataRF)=="islandChr")]
+
+##NEW
+ORs_dataRF<-ORs_dataRF[,-which(colnames(ORs_dataRF)=="Gene.start..bp.")]
+ORs_dataRF<-ORs_dataRF[,-which(colnames(ORs_dataRF)=="Gene.end..bp.")]
+
+##
+
+ORs_dataRF<-ORs_dataRF[,-which(colnames(ORs_dataRF)=="Greek.Island.composite.score")]
+
+NArows<-apply(ORs_dataRF[,-which(colnames(ORs_dataRF)=="index")], 1, function(x){length(which(is.na(x)))})
+#ORs_dataRF<-ORs_dataRF[-which(NArows>0),]
+
+ORs_dataRF$dist2ClosestIsland<-as.numeric(ORs_dataRF$dist2ClosestIsland)
+ORs_dataRF$Chromosome.scaffold.name<-as.factor(ORs_dataRF$Chromosome.scaffold.name)
+#NEW
+#ORs_dataRF$gen_clust<-as.factor(ORs_dataRF$gen_clust)
+ORs_dataRF$gen_clust<-gsub("OR-Cluster-", "", ORs_dataRF$gen_clust)
+ORs_dataRF$gen_clust<-as.numeric(ORs_dataRF$gen_clust)
+##
+ORs_dataRF$closestIsland<-as.factor(ORs_dataRF$closestIsland)
+ORs_dataRF$mOSN.Ebf.<-as.factor(ORs_dataRF$mOSN.Ebf.)
+ORs_dataRF$mOSN.Lhx2.<-as.factor(ORs_dataRF$mOSN.Lhx2.)
+ORs_dataRF$mOSN.H3K9me3.<-as.factor(ORs_dataRF$mOSN.H3K9me3.)
+ORs_dataRF$Within.500bp.of.OR.TSS.<-as.factor(ORs_dataRF$Within.500bp.of.OR.TSS.)
+
+rownames(ORs_dataRF)<-ORs_dataRF$Gene.name
+ORs_dataRF<-ORs_dataRF[,-which(colnames(ORs_dataRF)=="Gene.name")]
+
+indexRFprediction2<-function(data4prediction, PredictorsSelection, predictedCol){
+  #data4prediction=data frame of predictors with rows=elements which patterns are analysed and columns=values for predictors, PredictorsSelection=character vector of set of predictors that will be used for prediction, trainDataFraction=fraction of the spacePatterns that will be used for training, predictedCol="index"
+  
+  #indexPredict<-data4prediction[-which(is.na(rowSums(data4prediction))),]
+  indexPredict<-data4prediction[c(PredictorsSelection, predictedCol)]
+  
+  test  = subset(indexPredict, is.na(indexPredict$index)==TRUE)
+
+  real = data4prediction[rownames(test),predictedCol]
+  
+  train = subset(indexPredict, is.na(indexPredict$index)==FALSE)
+  
+  rf <- randomForest(
+    index ~ .,
+    data=train, na.action = na.omit
+  )
+  predicted<-predict(rf, newdata=test[,-which(colnames(test)==predictedCol)])
+  importance<-importance(rf)
+  return(list(predicted, real, importance, rf, train))
+}
+
+#NEW
+#sel_predictors<-colnames(ORs_dataRF)[-which(colnames(ORs_dataRF)=="gen_clust")]
+sel_predictors<-colnames(ORs_dataRF)[-which(colnames(ORs_dataRF)=="closestIsland")]
+sel_predictors<-sel_predictors[-which(sel_predictors=="index")]
+##
+
+rfModel<-indexRFprediction2(data4prediction=ORs_dataRF, PredictorsSelection=sel_predictors, predictedCol = "index")
+
+predictedRandomTraining=rfModel[[1]]
+real=rfModel[[2]]
+importance=rfModel[[3]]
+rfModel[[4]]
+
+```
+
+```{r, RFplots7}
+
+par(mar=c(8, 5, 5, 5))
+barplot(rev(sort(importance[,1]))[1:10], las=2, main="predictors importance", ylab="value", cex.names = 0.6)
+
+ZoneIndexes$`modern gene name`<-gsub("\\.", "-", ZoneIndexes$`modern gene name`)
+ZoneIndexes$`zone index`<-as.numeric(ZoneIndexes$`zone index`)
+ORs_dataRF$index_RFpredicted<-predictedRandomTraining[match(rownames(ORs_dataRF), names(predictedRandomTraining))]
+ORs_dataRF$DPTindex<-ORs_dataRF$index
+ORs_dataRF$DPTindex[which(!is.na(ORs_dataRF$index_RFpredicted))]<-ORs_dataRF$index_RFpredicted[which(!is.na(ORs_dataRF$index_RFpredicted))]
+
+ORs_dataRF$indexMiyamichiReal<-ZoneIndexes$`zone index`[match(rownames(ORs_dataRF), ZoneIndexes$`modern gene name`)]
+
+#mod<-lm(indexMiyamichiReal ~ DPTindex, data=ORs_dataRF[which(!is.na(ORs_dataRF$indexMiyamichiReal)),])
+mod<-gam(indexMiyamichiReal ~ s(DPTindex), data=ORs_dataRF[which(!is.na(ORs_dataRF$indexMiyamichiReal)),])
+summary(mod)
+ORs_dataRF$MiyamichiIndex<-predict(mod, ORs_dataRF)
+
+
+plotXYcorrelation(x=ORs_dataRF$indexMiyamichiReal[which(!is.na(ORs_dataRF$indexMiyamichiReal))], y=ORs_dataRF$MiyamichiIndex[which(!is.na(ORs_dataRF$indexMiyamichiReal))], xlab = "real indexes", ylab="predicted indexes", col=1, main="RF predictions for all OR Miyamichi indexes", ylim=c(1, 5), xlim=c(1, 5))
+
+plotXYcorrelation(y=ORs_dataRF$indexMiyamichiReal[which(is.na(ORs_dataRF$index) & !is.na(ORs_dataRF$indexMiyamichiReal))], x=ORs_dataRF$MiyamichiIndex[which(is.na(ORs_dataRF$index) & !is.na(ORs_dataRF$indexMiyamichiReal))], ylab = "real indexes", xlab="predicted indexes", col=1, main="predicted Miy. indexes for lowly expressed ORs with real Miy.index", ylim=c(1, 5), xlim=c(1, 5))
+```
+
+**RF plots for genes with Miyamichi index**
+
+```{r DPTvsMiy}
+#plot(ORs_dataRF$DPTindex, ORs_dataRF$MiyamichiIndex, pch=19, col=alpha("black", 0.3))
+#lines(ORs_dataRF$DPTindex, ORs_dataRF$indexMiyamichiReal, pch=19, type="p", col=alpha("red", 0.3))
+
+MiyIndex<-ORs_dataRF$MiyamichiIndex
+MiyIndex[which(!is.na(ORs_dataRF$indexMiyamichiReal))]<-ORs_dataRF$indexMiyamichiReal[which(!is.na(ORs_dataRF$indexMiyamichiReal))]
+
+color=rep("black", length(MiyIndex))
+color[which(!is.na(ORs_dataRF$indexMiyamichiReal))]<-"red"
+
+plot(ORs_dataRF$DPTindex, MiyIndex, pch=19, col=alpha(color, 0.3))
+
+
+```
+
+**DPT vs Miyamichi index** red=real Miyamichi index, black = predicted Miyamichi indexes
+
+```{r RFpredictLowORsClust}
+#Eliminate redundant predictors
+deORs_dataRF<-deORs_data[,-which(colnames(deORs_data)=="index")]
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="Greek.Islands")]
+#deORs_dataRF<-deORs_data[,-which(colnames(deORs_data)=="Greek.Islands")]
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="Gene.stable.ID")]
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="chromosome")]
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="islandChr")]
+
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="Greek.Island.composite.score")]
+
+NArows<-apply(deORs_dataRF, 1, function(x){length(which(is.na(x)))})
+#deORs_dataRF<-deORs_dataRF[-which(NArows>0),]
+
+deORs_dataRF$dist2ClosestIsland<-as.numeric(deORs_dataRF$dist2ClosestIsland)
+deORs_dataRF$Chromosome.scaffold.name<-as.factor(deORs_dataRF$Chromosome.scaffold.name)
+deORs_dataRF$gen_clust<-as.factor(deORs_dataRF$gen_clust)
+deORs_dataRF$closestIsland<-as.factor(deORs_dataRF$closestIsland)
+deORs_dataRF$mOSN.Ebf.<-as.factor(deORs_dataRF$mOSN.Ebf.)
+deORs_dataRF$mOSN.Lhx2.<-as.factor(deORs_dataRF$mOSN.Lhx2.)
+deORs_dataRF$mOSN.H3K9me3.<-as.factor(deORs_dataRF$mOSN.H3K9me3.)
+deORs_dataRF$Within.500bp.of.OR.TSS.<-as.factor(deORs_dataRF$Within.500bp.of.OR.TSS.)
+deORs_dataRF$clusters<-as.factor(deORs_dataRF$clusters)
+
+rownames(deORs_dataRF)<-deORs_dataRF$Gene.name
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="Gene.name")]
+
+
+#predictorsClass<-apply(deORs_dataRF, 2, class)
+#deORs_dataRF[,which(predictorsClass=="character")]<-apply(deORs_dataRF[,which(predictorsClass=="character")], 2, as.factor)
+
+#for(i in 1:dim(deORs_dataRF)[2]){
+# print(class(deORs_dataRF[,i]))
+#}
+
+weight<-sapply(deORs_dataRF$clusters, function(x){1/length(which(deORs_dataRF$clusters==x))})
+
+clustersRFprediction<-function(data4prediction, PredictorsSelection, trainDataFraction, predictedCol, ClWeights){
+  #data4prediction=data frame of predictors with rows=elements which patterns are analysed and columns=values for predictors, PredictorsSelection=character vector of set of predictors that will be used for prediction, trainDataFraction=fraction of the spacePatterns that will be used for training, predictedCol="index", ClWEights=weights based on cluster sizes
+  
+  #indexPredict<-data4prediction[-which(is.na(rowSums(data4prediction))),]
+  indexPredict<-data4prediction[c(PredictorsSelection, predictedCol)]
+  
+  set.seed(1)
+  #sample = sample.split(indexPredict[,1], SplitRatio = trainDataFraction)
+  sample = rep(FALSE, dim(indexPredict)[1])
+  sample[sample(1:dim(indexPredict)[1], round(trainDataFraction*dim(indexPredict)[1]), prob=ClWeights)]<-TRUE
+  test  = subset(indexPredict, sample == FALSE)
+
+  real = data4prediction[rownames(test),predictedCol]
+  
+  train = subset(indexPredict, sample == TRUE)
+  
+  test  = subset(indexPredict, sample == FALSE)
+  
+  rf <- randomForest(
+    clusters ~ .,
+    data=train, na.action = na.omit
+  )
+  predicted<-predict(rf, newdata=test[,-which(colnames(test)==predictedCol)])
+  importance<-importance(rf)
+  return(list(predicted, real, importance, rf))
+}
+
+sel_predictors<-colnames(deORs_dataRF)[-which(colnames(deORs_dataRF)=="gen_clust")]
+sel_predictors<-sel_predictors[-which(sel_predictors=="closestIsland")]
+sel_predictors<-sel_predictors[-which(sel_predictors=="clusters")]
+
+rfModel<-clustersRFprediction(data4prediction=deORs_dataRF, PredictorsSelection=sel_predictors, trainDataFraction=0.75, predictedCol = "clusters", ClWeights = weight)
+
+predictedRandomTraining=rfModel[[1]]
+real=rfModel[[2]]
+importance=rfModel[[3]]
+rfModel[[4]]
+
+```
+
+```{r, RFplots2}
+ClassHeat<-sapply(unique(real), function(x){100*table(predictedRandomTraining[real==x])/sum(table(predictedRandomTraining[real==x]))})
+colnames(ClassHeat)<-unique(real)
+ClassHeat<-ClassHeat[,order(colnames(ClassHeat))]
+heatmap.2(ClassHeat, Colv = NA, Rowv=NA, trace='none', key.xlab="%", key.ylab=NA, key.title=NA, col=viridis(100), cexRow = 0.8, cexCol = 0.8, xlab="real cluster", ylab="predicted cluster", dendrogram = 'none')
+#%=% genes from real cluster mapped to predicted cluster
+
+barplot(c(right=100*length(which(predictedRandomTraining==real))/length(real), wrong=100*length(which(predictedRandomTraining!=real))/length(real)), las=1, main="% right and wrong predictions", ylab="value", cex.names = 0.6)
+
+#plotXYcorrelation(x=real, y=predictedRandomTraining, xlab = "real indexes", ylab="predicted indexes", col=1, main="RF predictions for OR AP indexes")
+par(mar=c(8, 5, 5, 5))
+barplot(rev(sort(importance[,1]))[1:10], las=2, main="predictors importance", ylab="value", cex.names = 0.6)
+```
+
+**RF plots**
+
+```{r RFpredictLowORsClust2}
+#Eliminate redundant predictors
+#deORs_dataRF<-deORs_data[,-which(colnames(deORs_data)=="index")]
+#deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="Greek.Islands")]
+deORs_dataRF<-deORs_data[,-which(colnames(deORs_data)=="Greek.Islands")]
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="Gene.stable.ID")]
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="chromosome")]
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="islandChr")]
+
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="Greek.Island.composite.score")]
+
+NArows<-apply(deORs_dataRF, 1, function(x){length(which(is.na(x)))})
+#deORs_dataRF<-deORs_dataRF[-which(NArows>0),]
+
+deORs_dataRF$dist2ClosestIsland<-as.numeric(deORs_dataRF$dist2ClosestIsland)
+deORs_dataRF$Chromosome.scaffold.name<-as.factor(deORs_dataRF$Chromosome.scaffold.name)
+deORs_dataRF$gen_clust<-as.factor(deORs_dataRF$gen_clust)
+deORs_dataRF$closestIsland<-as.factor(deORs_dataRF$closestIsland)
+deORs_dataRF$mOSN.Ebf.<-as.factor(deORs_dataRF$mOSN.Ebf.)
+deORs_dataRF$mOSN.Lhx2.<-as.factor(deORs_dataRF$mOSN.Lhx2.)
+deORs_dataRF$mOSN.H3K9me3.<-as.factor(deORs_dataRF$mOSN.H3K9me3.)
+deORs_dataRF$Within.500bp.of.OR.TSS.<-as.factor(deORs_dataRF$Within.500bp.of.OR.TSS.)
+deORs_dataRF$clusters<-as.factor(deORs_dataRF$clusters)
+
+rownames(deORs_dataRF)<-deORs_dataRF$Gene.name
+deORs_dataRF<-deORs_dataRF[,-which(colnames(deORs_dataRF)=="Gene.name")]
+
+
+#predictorsClass<-apply(deORs_dataRF, 2, class)
+#deORs_dataRF[,which(predictorsClass=="character")]<-apply(deORs_dataRF[,which(predictorsClass=="character")], 2, as.factor)
+
+#for(i in 1:dim(deORs_dataRF)[2]){
+# print(class(deORs_dataRF[,i]))
+#}
+
+sel_predictors<-colnames(deORs_dataRF)[-which(colnames(deORs_dataRF)=="gen_clust")]
+sel_predictors<-sel_predictors[-which(sel_predictors=="closestIsland")]
+sel_predictors<-sel_predictors[-which(sel_predictors=="clusters")]
+
+rfModel<-clustersRFprediction(data4prediction=deORs_dataRF, PredictorsSelection=sel_predictors, trainDataFraction=0.75, predictedCol = "clusters", ClWeights = weight)
+
+predictedRandomTraining=rfModel[[1]]
+real=rfModel[[2]]
+importance=rfModel[[3]]
+rfModel[[4]]
+
+```
+
+```{r, RFplots3}
+ClassHeat<-sapply(unique(real), function(x){100*table(predictedRandomTraining[real==x])/sum(table(predictedRandomTraining[real==x]))})
+colnames(ClassHeat)<-unique(real)
+ClassHeat<-ClassHeat[,order(colnames(ClassHeat))]
+heatmap.2(ClassHeat, Colv = NA, Rowv=NA, trace='none', key.xlab="%", key.ylab=NA, key.title=NA, col=viridis(100), cexRow = 0.8, cexCol = 0.8, xlab="real cluster", ylab="predicted cluster", dendrogram = 'none')
+#%=% genes from real cluster mapped to predicted cluster
+
+barplot(c(right=100*length(which(predictedRandomTraining==real))/length(real), wrong=100*length(which(predictedRandomTraining!=real))/length(real)), las=1, main="% right and wrong predictions", ylab="value", cex.names = 0.6)
+
+#plotXYcorrelation(x=real, y=predictedRandomTraining, xlab = "real indexes", ylab="predicted indexes", col=1, main="RF predictions for OR AP indexes")
+par(mar=c(8, 5, 5, 5))
+barplot(rev(sort(importance[,1]))[1:10], las=2, main="predictors importance", ylab="value", cex.names = 0.6)
+```
+
+**RF plots**
+
+```{r forGOanalysis}
+for(cluster in unique(DEGsfile$clustersMinCS25)){
+  tmp=DEGsfile$Gene.name[which(DEGsfile$clustersMinCS25==cluster)]
+  write.table(tmp, paste("./supp_tables/forGOanalysis/", cluster, "_newAPDEGs_minCS25.csv", sep=""), row.names = F, quote = F, col.names = F)
+}
+
+for(cluster in unique(DEGsfile$clustersMinCS50)){
+  tmp=DEGsfile$Gene.name[which(DEGsfile$clustersMinCS50==cluster)]
+  tmp=tmp[-grep("Olfr", tmp)]
+  write.table(tmp, paste("./supp_tables/forGOanalysis/", cluster, "_newAPDEGs_minCS50.csv", sep=""), row.names = F, quote = F, col.names = F)
+}
+
+for(cluster in unique(DEGsfile$clustersMinCS100)){
+  tmp=DEGsfile$Gene.name[which(DEGsfile$clustersMinCS100==cluster)]
+  write.table(tmp, paste("./supp_tables/forGOanalysis/", cluster, "_newAPDEGs_minCS100.csv", sep=""), row.names = F, quote = F, col.names = F)
+}
+
+tmp=rownames(normalized)[which(filt==1)]
+write.table(tmp, "./supp_tables/forGOanalysis/newAPgenes_GObg_ORs.csv", row.names = F, quote = F, col.names = F)
+
+tmp=rownames(normalized)[which(filt==1)]
+tmp=tmp[-grep("Olfr", tmp)]
+write.table(tmp, "./supp_tables/forGOanalysis/newAPgenes_GObg.csv", row.names = F, quote = F, col.names = F)
+```
+
+```{r GOplotsMinCS50, echo=FALSE, message=FALSE, warning=FALSE}
+
+pdf(file = "./figures_pdf2/FigS2A_AP.pdf", width=7, height = 5)
+
+par(las=2, mar=c(6,21,4,3))
+
+for(file in paste("./supp_tables/forGOanalysis/gorilla_GO/", list.files(path="./supp_tables/forGOanalysis/gorilla_GO/", pattern = "GO_AP.+MinCS50"), sep="")){
+  GSEA<-read.csv(file, stringsAsFactors = F, sep="\t")
+  GSEA<-GSEA[grep("GO:", GSEA$GO.Term),1:5]
+  GSEA<-GSEA[which(GSEA$FDR.q.value<0.05),]
+  GSEA<-GSEA[order(-GSEA$Enrichment),]
+  plotTitle<-gsub("./supp_tables/forGOanalysis/gorilla_GO/GO_AP", "", file)
+  plotTitle<-gsub("\\MinCS50.xls", "", plotTitle)
+  if(length(GSEA$GO.Term)>0){
+    barplot(GSEA$Enrichment[rev(1:20)], horiz=TRUE, names.arg=GSEA$Description[rev(1:20)], cex.names=0.6, main=plotTitle, xlab="Enrichment", las=1)
+  }
+}
+
+dev.off()
+
+pdf(file = "./figures_pdf2/FigS2D.pdf", width=7, height = 5)
+
+par(las=2, mar=c(6,21,4,3))
+
+for(file in paste("./supp_tables/forGOanalysis/gorilla_GO2/", list.files(path="./supp_tables/forGOanalysis/gorilla_GO2/", pattern = "GO_AP.+MinCS50"), sep="")){
+  GSEA<-read.csv(file, stringsAsFactors = F, sep="\t")
+  GSEA<-GSEA[grep("GO:", GSEA$GO.Term),1:5]
+  GSEA<-GSEA[which(GSEA$FDR.q.value<0.05),]
+  GSEA<-GSEA[order(-GSEA$Enrichment),]
+  plotTitle<-gsub("./supp_tables/forGOanalysis/gorilla_GO2/GO_AP", "", file)
+  plotTitle<-gsub("\\MinCS50.xls", "", plotTitle)
+  if(length(GSEA$GO.Term)>0){
+    barplot(GSEA$Enrichment[rev(1:20)], horiz=TRUE, names.arg=GSEA$Description[rev(1:20)], cex.names=0.6, main=plotTitle, xlab="Enrichment", las=1)
+  }
+}
+
+dev.off()
+```
+
+**Figure** 20 Most Enriched GO categories in the clusters with Min CS = 50
+
+```{r GOplotsMinCS100, echo=FALSE, message=FALSE, warning=FALSE}
+#par(las=2, mar=c(6,21,4,3))
+
+#for(file in paste("./supp_tables/forGOanalysis/gorilla_GO/", list.files(path="./supp_tables/forGOanalysis/gorilla_GO/", pattern = "GO_AP.+MinCS100"), sep="")){
+#  GSEA<-read.csv(file, stringsAsFactors = F, sep="\t")
+#  GSEA<-GSEA[grep("GO:", GSEA$GO.Term),1:5]
+#  GSEA<-GSEA[which(GSEA$FDR.q.value<0.05),]
+#  plotTitle<-gsub("./supp_tables/forGOanalysis/gorilla_GO/GO_AP", "", file)
+#  plotTitle<-gsub("\\.xls", "", plotTitle)
+#  if(length(GSEA$GO.Term)>0){
+#    barplot(GSEA$Enrichment[rev(1:20)], horiz=TRUE, names.arg=GSEA$Description[rev(1:20)], cex.names=0.8, main=plotTitle, xlab="Enrichment", las=1)
+#  }
+#}
+```
+
+**Figure** 20 Most Enriched GO categories in the clusters with Min CS = 100
+
+#####################################
+
+## Differential expression without normalizing by markers (Just non OR genes)
+
+```{r Differential_expression_forNeuronGenes, echo=FALSE, message=FALSE, warning=FALSE}
+#Exclude Olfrs
+normalized<-norm_complete
+normalized<-normalized[-grep("Olfr", rownames(normalized)),]
+
+write.csv(normalized, "./supp_tables/newAP_nonORS_normalized_rpm_repsAvg_G99.csv")
+
+#Binarize gene expression data. If expression level is above the median, value=1, else, value=0
+
+binMat<-binarizeData(data=normalized)
+
+############################### AUTOCORRELATION
+
+#filter genes as candidates for testing depending on the difference between the group of samples with the minimum expression values and the group pf samples with the maximum expression values
+filt<-getDEGcandidatesFlags(data=normalized, groupSize=3, minMinsMean4FC=1, minMaxsMean4FC=5, minFC=2, minDiff=4)
+
+#Autocorrelation test (Ljung-Box test)
+
+genes.table<-autocorrelationTest(data=binMat, maxLag=(dim(binMat)[2]-10), filter=filt)
+dim(normalized[genes.table$genes.names[genes.table$FDR<0.01],])
+genes.table$genes.names<-as.character(genes.table$genes.names)
+```
+
+
+```{r DEGs_heat3, message=FALSE, warning=FALSE}
+logNormDEGs<-log10(normalized[genes.table$genes.names[genes.table$FDR<0.01],]+1)
+
+heatDEGs2.1<-t(apply(logNormDEGs, 1, normBetween0and1))
+
+heatmap.2(as.matrix(heatDEGs2.1), Colv = NA, xlab="Position AP", trace='none', key.xlab="log10meanRPMnorm", key.ylab=NA, key.title=NA, col=viridis(100), cexRow = 0.8, cexCol = 0.8)
+
+
+```
+
+**Figure 11.** Heatmap of non OR DEGs with dendrogram clustering genes with similar spatial expression patterns
+
+```{r Differentially_expressed_nonORs, echo=FALSE, message=FALSE, warning=FALSE}
+
+#ORs among DEGs
+
+DEGsbox<-normalized[genes.table$genes.names[genes.table$FDR<0.01],]
+#colnames(DEGsbox)<-normalized[dim(normalized)[1],]
+
+DEGsfile<-genes_data[match(genes.table$genes.names[genes.table$FDR<0.01], genes_data$Gene.name),]
+DEGsfile<-data.frame(DEGsfile, genes.table[genes.table$FDR<0.01,])
+DEGsfile<-DEGsfile[,-7]
+
+write.csv(DEGsfile, "./supp_tables/newAPDEnonORs.autocor.binMatFDR0.01filt_G99.csv")
+
+```
+
+
+```{r FitData, echo=FALSE, message=FALSE, warning=FALSE}
+
+position<-as.numeric(colnames(logNormDEGs))
+logNormDEGs<-data.frame(position, t(logNormDEGs))
+
+fitted_data<-apply(logNormDEGs[,2:length(colnames(logNormDEGs))], 2, function(x){locfit(x~lp(logNormDEGs[,1], deg = 2, nn=1), data=logNormDEGs)})
+
+###### Analysis continues using normalized between 0 and 1 fitted(with predicted values if necessary) log10 rpm normalized data #####
+
+#deTaars<-fitted_data[grep("Taar", names(fitted_data))]
+deORs<-fitted_data
+deORs<-sapply(1:length(deORs), function(x){predict(deORs[[x]],  c(1:max(position)))})
+colnames(deORs)<-names(fitted_data)
+deORs<-t(deORs)
+deORs<-t(apply(deORs, 1, normBetween0and1))
+colnames(deORs)<-position
+
+```
+
+```{r ComparetoChemSDEGs0.18, echo=FALSE, message=FALSE, warning=FALSE}
+DEGsChems.18<-read.csv("../DEGsChemSensFDR0.18.csv", stringsAsFactors = FALSE, header=F, sep=";")
+colnames(DEGsChems.18)<-DEGsChems.18[2,]
+DEGsChems.18<-DEGsChems.18[-(1:2),]
+
+DEGsChems.51<-read.csv("../DEGsChemSensFDR0.51.csv", stringsAsFactors = FALSE, header=F, sep=";")
+colnames(DEGsChems.51)<-DEGsChems.51[2,]
+DEGsChems.51<-DEGsChems.51[-(1:2),]
+
+DEGsboxDEGsChems.18_venn<-venn.diagram(list(DEGSbox=gsub("\\.", "-", rownames(deORs)), DEGsChemS0.18=DEGsChems.18$`gene name`), fill = c("red", "blue"), hyper.test = TRUE, total.population = length(union(gsub("\\.", "-", rownames(normalized)), DEGsChems.18$`gene name`)), lower.tail = FALSE, alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, cat.pos = c(-10,10), sub.cex = 1.5, filename = NULL, scaled=T)
+
+grid.draw(DEGsboxDEGsChems.18_venn)
+
+```
+
+
+**Figure 30.** Venn Diagram showing the overlap between our differentially expressed genes and the ones found in https://academic.oup.com/chemse/article/43/6/427/5001524#118517741 with FDR<0.18
+
+```{r ComparetoChemSDEGs0.51, echo=FALSE, message=FALSE, warning=FALSE}
+
+DEGsboxDEGsChems.51_venn<-venn.diagram(list(DEGSbox=gsub("\\.", "-", rownames(deORs)), DEGsChemS0.51=DEGsChems.51$`gene name`), fill = c("red", "blue"), hyper.test = TRUE, total.population = length(union(gsub("\\.", "-", rownames(normalized)), DEGsChems.51$`gene name`)), lower.tail = FALSE, alpha = c(0.5, 0.5), cex = 2, cat.cex = 2, cat.pos = c(-10,10), sub.cex = 1.5, filename = NULL, scaled=T)
+
+grid.draw(DEGsboxDEGsChems.51_venn)
+
+```
+
+**Figure 31.** Venn Diagram showing the overlap between our differentially expressed genes and the ones found in https://academic.oup.com/chemse/article/43/6/427/5001524#118517741 with FDR<0.51
+
+##Clustering using all non OR genes
+
+```{r DifferentiallyExpressed_nonORs_ClusteringAlt, echo=FALSE, message=FALSE, warning=FALSE}
+#Clustering by fitted data from differentially expressed ORs 
+
+#Clustering
+
+test.dist<-as.dist(sqrt(0.5*((1-cor(t(deORs),method="spearman"))))) #define correlation distance matrix
+#estimate number of clusters with dynamicTreeCut
+cut2<-cutreeDynamic(hclust(test.dist, method="average"), distM=as.matrix(test.dist), 
+                    minClusterSize=100, method="hybrid",deepSplit = 0 )
+clusters_deORsMinCS100<-labels2colors(cut2) 
+if("white" %in% clusters_deORsMinCS100){
+  clusters_deORsMinCS100[clusters_deORsMinCS100=="white"]<-"skyblue4"
+}
+  
+names(clusters_deORsMinCS100)<-row.names(deORs)
+table(clusters_deORsMinCS100)
+
+```
+
+
+```{r DifferentiallyExpressed_nonORs_Clustering, echo=FALSE, message=FALSE, warning=FALSE}
+#Clustering by fitted data from differentially expressed ORs 
+
+#Clustering
+
+test.dist<-as.dist(sqrt(0.5*((1-cor(t(deORs),method="spearman"))))) #define correlation distance matrix
+#estimate number of clusters with dynamicTreeCut
+cut2<-cutreeDynamic(hclust(test.dist, method="average"), distM=as.matrix(test.dist), 
+                    minClusterSize=50, method="hybrid",deepSplit = 0 )
+clusters_deORs<-labels2colors(cut2) 
+if("white" %in% clusters_deORs){
+  clusters_deORs[clusters_deORs=="white"]<-"skyblue4"
+}
+  
+names(clusters_deORs)<-row.names(deORs)
+table(clusters_deORs)
+
+dframe<-data.frame(olfr=names(clusters_deORs), cluster=clusters_deORs)
+#write.csv(dframe, "./clusters_deORsAP.csv")
+
+```
+
+
+```{r Visualize_clusters456, echo=FALSE, message=FALSE, warning=FALSE}
+
+#visualize data with tsne
+set.seed(10)
+test.tsne<-Rtsne(test.dist, is_distance = T)
+plot(test.tsne$Y, col=alpha(clusters_deORs, 0.3), pch=19, xlab="tSNE1", ylab="tSNE2")
+```
+
+**non OR DEGs tSNE**
+
+
+```{r DEGsUmap, echo=FALSE, message=FALSE, warning=FALSE}
+ORsUmap<-umap(deORs) #normalized Differentially Expressed OR genes
+plot(ORsUmap$layout[,1], ORsUmap$layout[,2], col=alpha(clusters_deORs, 0.3), pch=19, xlab="UMAP1", ylab="UMAP2")
+
+```
+
+**non OR DEGs UMAP**
+
+```{r Pattern_perClusternonORDEGs, echo=FALSE, message=FALSE, warning=FALSE}
+
+#Expression patterns per cluster
+
+par(mfrow=c(3, 3))
+
+plotMeanPatternPerCluster(data=deORs, clusters=clusters_deORs, ylim=c(0, 1), ylab="fitted norm. log10 mean rpm expression", xlab="position AP")
+
+```
+
+**Pattern per cluster of non OR DEGs**
+
+```{r myIndexesDEnonORs, echo=FALSE, message=FALSE, warning=FALSE}
+#get "zone indexes" for all ORs. This will be weighted averages of positions: weights=expression values 
+#ourIndexes<-apply(deORs, 1, function(x){weighted.mean(1:max(position), w=x)})
+
+#get "zone indexes" for all ORs. This will be position of the expression peak (maximum) 
+ourIndexes<-apply(deORs, 1, function(x){which(x==max(x))})
+```
+
+```{r writenonORDEGsFile}
+
+DEGsfile<-cbind(DEGsfile, clustersMinCS50=clusters_deORs, clustersMinCS100=clusters_deORsMinCS100, ourIndexes)
+write.csv(DEGsfile, "./supp_tables/newAPDEnonORs.autocor.binMatFDR0.01filt_G99.csv")
+
+```

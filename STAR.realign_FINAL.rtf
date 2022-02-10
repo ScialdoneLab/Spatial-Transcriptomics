@@ -1,0 +1,484 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2512
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fnil\fcharset0 Menlo-Regular;}
+{\colortbl;\red255\green255\blue255;\red0\green0\blue0;\red255\green255\blue255;\red36\green38\blue41;
+\red235\green236\blue237;\red37\green127\blue159;\red104\green26\blue29;\red27\green31\blue34;\red244\green246\blue249;
+\red7\green68\blue184;\red35\green38\blue42;\red128\green19\blue25;}
+{\*\expandedcolortbl;;\csgray\c0;\csgray\c100000;\cssrgb\c18824\c20000\c21176;
+\cssrgb\c93725\c94118\c94510;\cssrgb\c16863\c56863\c68627;\cssrgb\c49020\c15294\c15294;\cssrgb\c14118\c16078\c18039;\cssrgb\c96471\c97255\c98039;
+\cssrgb\c0\c36078\c77255;\cssrgb\c18431\c20000\c21569;\cssrgb\c58039\c12941\c12941;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww19640\viewh13480\viewkind0
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+
+\f0\fs22 \cf2 \cb3 \CocoaLigature0 \
+\
+## check available memory \
+\pard\pardeftab720\partightenfactor0
+
+\fs26 \cf4 \cb5 \expnd0\expndtw0\kerning0
+\CocoaLigature1 df -\cf6 Ph\cf4  . | tail -\cf7 1\cf4  | awk \cf7 '\{print $4\}'\
+
+\fs22 \cf2 \cb3 \kerning1\expnd0\expndtw0 \CocoaLigature0 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+#####Get counts as in https://www.nature.com/articles/srep18178\
+\
+#Pass fastq files to rawsNewAXIS folders\
+for folder in 07*\
+do\
+	cd $folder\
+	cd H*\
+	mv *.fastq.gz ../../..\
+	cd ../../\
+done\
+\
+rm -r *\
+mv ../*.fastq.gz ./ \
+\
+\
+#Get genome (mmus.GRCm38.99) #In \cb1 mmusGenome_GRCm38.99 folder\cb3 \
+\
+wget ftp://ftp.ensembl.org/pub/release-99/fasta/mus_musculus/dna/Mus_musculus.GRCm38.dna.chromosome.\{1..19\}.fa.gz \
+wget ftp://ftp.ensembl.org/pub/release-99/fasta/mus_musculus/dna/Mus_musculus.GRCm38.dna.chromosome.\{MT,X,Y\}.fa.gz\
+gunzip -c Mus_musculus.GRCm38.dna.chromosome.* > GRCm38.99.all.fa\
+\
+wget ftp://ftp.ensembl.org/pub/release-99/gtf/mus_musculus/Mus_musculus.GRCm38.99.gtf.gz\
+gunzip Mus_musculus.GRCm38.99.gtf.gz\
+\
+#Remove genes Capn5 and Xntrpc from gtf\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cb1 grep -v "Capn5" Mus_musculus.GRCm38.99.gtf > mouse.gtf\
+grep -v \'93Xntrpc\'94 mouse.gtf > Mus_musculus.GRCm38.99.edited.gtf\
+rm mouse.gtf\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cb3 #Install STAR #in localscratch01/mayra.ruiz\
+\
+\pard\pardeftab720\partightenfactor0
+
+\fs27\fsmilli13600 \cf8 \cb9 \expnd0\expndtw0\kerning0
+\CocoaLigature1 wget https://github.com/alexdobin/STAR/archive/2.7.3a.tar.gz\
+tar -xzf 2.7.3a.tar.gz\
+\pard\pardeftab720\partightenfactor0
+\cf10 cd\cf8  STAR-2.7.3a\
+\cf10 cd\cf8  STAR/source\
+make STAR\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+
+\fs22 \cf2 \cb3 \kerning1\expnd0\expndtw0 \CocoaLigature0 #Get genome indexes #In \cb1 mmusGenome_GRCm38.99 folder\
+\cb3 \
+mkdir ./GRCm38.99_genomeIndexesEdited\
+chmod 777 ./GRCm38.99_genomeIndexesEdited\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cb1 ../STAR-2.7.3a/source/STAR --runThreadN 8 --runMode genomeGenerate --genomeDir ./GRCm38.99_genomeIndexesEdited --genomeFastaFiles ./GRCm38.99.all.fa --sjdbGTFfile ./Mus_musculus.GRCm38.99.edited.gtf --sjdbOverhang 100 --limitGenomeGenerateRAM 100000000000\cb3 \
+\
+#Align (in rawsNewAXIS folders)\
+\
+#DV\
+\
+for f1 in ./*R1_001.fastq.gz\
+do\
+	echo $f1\
+	f2=$\{f1/R1_001/R2_001\}\
+	echo $f2\
+	prefix=$\{f1/_*/\}\
+	echo $prefix\
+	ncf1=$\{f1/.gz/\}\
+	ncf2=$\{f2/.gz/\}\
+	gunzip $f1\
+	gunzip $f2\
+	\cb1 ../STAR-2.7.3a/source/STAR\cb3  --genomeDir ../\cb1 mmusGenome_GRCm38.99\cb3 /GRCm38.99_genomeIndexesEdited  --runThreadN 8 --readFilesIn $ncf1 $ncf2 --outFileNamePrefix $prefix --outSAMunmapped Within --outFilterMultimapNmax 1000 --outFilterMismatchNmax 4 --outFilterMatchNmin 100 --alignIntronMax 50000 --alignMatesGapMax 50500 --outSAMstrandField intronMotif --outFilterType BySJout 	gzip $ncf1\
+	gzip $ncf2\
+	mkdir ../alignedNewDV/$prefix\
+	mv ./*out ../alignedNewDV/$prefix\
+	mv ./*sam ../alignedNewDV/$prefix\
+	mv ./*tab ../alignedNewDV/$prefix\
+done\
+\
+\
+#LML\
+\
+for f1 in ./*R1_001.fastq.gz\
+do\
+	echo $f1\
+	f2=$\{f1/R1_001/R2_001\}\
+	echo $f2\
+	prefix=$\{f1/_*/\}\
+	echo $prefix\
+	ncf1=$\{f1/.gz/\}\
+	ncf2=$\{f2/.gz/\}\
+	gunzip $f1\
+	gunzip $f2\
+	\cb1 ../STAR-2.7.3a/source/STAR\cb3  --genomeDir ../\cb1 mmusGenome_GRCm38.99\cb3 /GRCm38.99_genomeIndexesEdited  --runThreadN 8 --readFilesIn $ncf1 $ncf2 --outFileNamePrefix $prefix --outSAMunmapped Within --outFilterMultimapNmax 1000 --outFilterMismatchNmax 4 --outFilterMatchNmin 100 --alignIntronMax 50000 --alignMatesGapMax 50500 --outSAMstrandField intronMotif --outFilterType BySJout 	gzip $ncf1\
+	gzip $ncf2\
+	mkdir ../alignedNewLML/$prefix\
+	mv ./*out ../alignedNewLML/$prefix\
+	mv ./*sam ../alignedNewLML/$prefix\
+	mv ./*tab ../alignedNewLML/$prefix\
+done\
+\
+#PA\
+\
+for f1 in ./*R1_001.fastq.gz\
+do\
+	echo $f1\
+	f2=$\{f1/R1_001/R2_001\}\
+	echo $f2\
+	prefix=$\{f1/_*/\}\
+	echo $prefix\
+	ncf1=$\{f1/.gz/\}\
+	ncf2=$\{f2/.gz/\}\
+	gunzip $f1\
+	gunzip $f2\
+	\cb1 ../STAR-2.7.3a/source/STAR\cb3  --genomeDir ../\cb1 mmusGenome_GRCm38.99\cb3 /GRCm38.99_genomeIndexesEdited  --runThreadN 4 --readFilesIn $ncf1 $ncf2 --outFileNamePrefix $prefix --outSAMunmapped Within --outFilterMultimapNmax 1000 --outFilterMismatchNmax 4 --outFilterMatchNmin 100 --alignIntronMax 50000 --alignMatesGapMax 50500 --outSAMstrandField intronMotif --outFilterType BySJout 	gzip $ncf1\
+	gzip $ncf2\
+	mkdir ../alignedNewPA/$prefix\
+	mv ./*out ../alignedNewPA/$prefix\
+	mv ./*sam ../alignedNewPA/$prefix\
+	mv ./*tab ../alignedNewPA/$prefix\
+done\
+\
+#Old DV1\
+\
+for f1 in ./*R1_001.fastq.gz\
+do\
+	echo $f1\
+	f2=$\{f1/R1_001/R2_001\}\
+	echo $f2\
+	prefix=$\{f1/_*/\}\
+	echo $prefix\
+	ncf1=$\{f1/.gz/\}\
+	ncf2=$\{f2/.gz/\}\
+	gunzip $f1\
+	gunzip $f2\
+	\cb1 ../STAR-2.7.3a/source/STAR\cb3  --genomeDir ../\cb1 mmusGenome_GRCm38.99\cb3 /GRCm38.99_genomeIndexesEdited  --runThreadN 4 --readFilesIn $ncf1 $ncf2 --outFileNamePrefix $prefix --outSAMunmapped Within --outFilterMultimapNmax 1000 --outFilterMismatchNmax 4 --outFilterMatchNmin 100 --alignIntronMax 50000 --alignMatesGapMax 50500 --outSAMstrandField intronMotif --outFilterType BySJout 	gzip $ncf1\
+	gzip $ncf2\
+	mkdir ../alignedOldDV1/$prefix\
+	mv ./*out ../alignedOldDV1/$prefix\
+	mv ./*sam ../alignedOldDV1/$prefix\
+	mv ./*tab ../alignedOldDV1/$prefix\
+done\
+\
+#XI DV1\
+\
+\cb1 mv XI_DV1_1_R2.fastq.gz XI_DV1_01_R2.fastq.gz \'85\cb3 \
+\
+for f1 in ./*R1.fastq.gz\
+do\
+	echo $f1\
+	f2=$\{f1/R1/R2\}\
+	echo $f2\
+	prefix=$\{f1/_R1*/\}\
+	echo $prefix\
+	ncf1=$\{f1/.gz/\}\
+	ncf2=$\{f2/.gz/\}\
+	gunzip $f1\
+	gunzip $f2\
+	\cb1 ../STAR-2.7.3a/source/STAR\cb3  --genomeDir ../\cb1 mmusGenome_GRCm38.99\cb3 /GRCm38.99_genomeIndexesEdited  --runThreadN 4 --readFilesIn $ncf1 $ncf2 --outFileNamePrefix $prefix --outSAMunmapped Within --outFilterMultimapNmax 1000 --outFilterMismatchNmax 4 --outFilterMatchNmin 100 --alignIntronMax 50000 --alignMatesGapMax 50500 --outSAMstrandField intronMotif --outFilterType BySJout 	gzip $ncf1\
+	gzip $ncf2\
+	mkdir ../alignedXIDV1/$prefix\
+	mv ./*out ../alignedXIDV1/$prefix\
+	mv ./*sam ../alignedXIDV1/$prefix\
+	mv ./*tab ../alignedXIDV1/$prefix\
+done\
+\
+#Convert to bam and sort (in alignedNewAXIS folders)\
+\
+#for files that had problems\
+\cb1 samtools sort unsorted.bam -@ 4 -o ./0700605611.sorted.bam > ./0700605611.sorted.bam\cb3 \
+\
+for folder in 07*\
+do\
+	cd $folder\
+	output=$folder.sorted.bam\
+	file=$folder\'94Aligned.out.sam\'94\
+	samtools view -bS $file -@ 1 > unsorted.bam\
+	samtools sort unsorted.bam -T $folder -@ 4 -o $output\
+	rm unsorted.bam\
+	cd ..\
+done\
+\
+#For Old DV1\
+\
+for folder in LN*\
+do\
+	cd $folder\
+	output=$folder.sorted.bam\
+	file=$folder\'94Aligned.out.sam\'94\
+	samtools view -bS $file -@ 1 > unsorted.bam\
+	samtools sort unsorted.bam -T $folder -@ 4 -o $output\
+	rm unsorted.bam\
+	cd ..\
+done\
+\
+#For XI DV1\
+\
+for folder in XI*\
+do\
+	cd $folder\
+	output=$folder.sorted.bam\
+	file=$folder\'94Aligned.out.sam\'94\
+	samtools view -bS $file -@ 1 > unsorted.bam\
+	samtools sort unsorted.bam -T $folder -@ 4 -o $output\
+	rm unsorted.bam\
+	cd ..\
+done\
+\
+#Eliminate sam files (in alignedNewAXIS folders)\
+\
+for folder in 07*\
+do\
+	cd $folder\
+	rm *.sam\
+	cd ..\
+done\
+\
+#For Old DV1\
+\
+for folder in LN*\
+do\
+	cd $folder\
+	rm *.sam\
+	cd ..\
+done\
+\
+#For XI DV1\
+\
+for folder in XI*\
+do\
+	cd $folder\
+	rm *.sam\
+	cd ..\
+done\
+\
+#Eliminate reads that align to many places (in alignedNewAXIS folders)\
+\
+for folder in 07*\
+do\
+	cd $folder\
+	file=$folder.sorted.bam\
+	output=$\{file/sorted/unique\}\
+	samtools view -H \cb1 -q 255 $file\cb3  > header.sam\
+	\cb1 samtools view -q 255 $file | \cb3 cat header.sam - | samtools view -Sb - -@ 1 > ./$output\
+	rm header.sam\
+	cd ..\
+done\
+\
+#For Old DV1\
+\
+for folder in LN*\
+do\
+	cd $folder\
+	file=$folder.sorted.bam\
+	output=$\{file/sorted/unique\}\
+	samtools view -H \cb1 -q 255 $file\cb3  > header.sam\
+	\cb1 samtools view -q 255 $file | \cb3 cat header.sam - | samtools view -Sb - -@ 1 > ./$output\
+	rm header.sam\
+	cd ..\
+done\
+\
+#For XI DV1\
+\
+for folder in XI*\
+do\
+	cd $folder\
+	file=$folder.sorted.bam\
+	output=$\{file/sorted/unique\}\
+	samtools view -H \cb1 -q 255 $file\cb3  > header.sam\
+	\cb1 samtools view -q 255 $file | \cb3 cat header.sam - | samtools view -Sb - -@ 1 > ./$output\
+	rm header.sam\
+	cd ..\
+done\
+\
+#Get counts (in alignedNewAXIS folders)\
+\
+for folder in 07*\
+do\
+	cd $folder\
+	output=$folder.counts.csv\
+\cb1 	/home/ies/mayra.ruiz/miniconda3/bin/htseq-count\cb3  -f bam -m intersection-nonempty -s no -i gene_name $folder.unique.bam \cb1 ../../mmusGenome_GRCm38.99/Mus_musculus.GRCm38.99.edited.gtf\cb3  -r pos >> $output\
+	cd ..\
+done\
+\
+#For Old DV1\
+\
+for folder in LN*\
+do\
+	cd $folder\
+	output=$folder.counts.csv\
+\cb1 	/home/ies/mayra.ruiz/miniconda3/bin/htseq-count\cb3  -f bam -m intersection-nonempty -s no -i gene_name $folder.unique.bam \cb1 ../../mmusGenome_GRCm38.99/Mus_musculus.GRCm38.99.edited.gtf\cb3  -r pos >> $output\
+	cd ..\
+done\
+\
+#For XI DV1\
+\
+for folder in XI*\
+do\
+	cd $folder\
+	output=$folder.counts.csv\
+\cb1 	/home/ies/mayra.ruiz/miniconda3/bin/htseq-count\cb3  -f bam -m intersection-nonempty -s no -i gene_name $folder.unique.bam \cb1 ../../mmusGenome_GRCm38.99/Mus_musculus.GRCm38.99.edited.gtf\cb3  -r pos >> $output\
+	cd ..\
+done\
+\
+\
+#Make datasets with all samples (in alignedNewAXIS folders)\
+\
+#DV\
+\cb1 for folder in 0700*; do cd $folder; cp *.counts.csv ../; cd ..; done \cb3 \
+paste \cb1 07*.counts.csv\cb3  > ../DV_dataset_G99.csv\
+\cb1 ls 07*.counts.csv\cb3  > ../DVsample_names_G99.csv\
+rm \cb1 *.counts.csv \cb3 \
+\
+#LML\
+\cb1 for folder in 0700*; do cd $folder; cp *.counts.csv ../; cd ..; done \cb3 \
+paste \cb1 07*.counts.csv\cb3  > ../LML_dataset_G99.csv\
+\cb1 ls 07*.counts.csv\cb3  > ../LMLsample_names_G99.csv\
+rm \cb1 *.counts.csv \cb3 \
+\
+#PA\
+\cb1 for folder in 0700*; do cd $folder; cp *.counts.csv ../; cd ..; done \cb3 \
+paste \cb1 07*.counts.csv\cb3  > ../PA_dataset_G99.csv\
+\cb1 ls 07*.counts.csv\cb3  > ../PAsample_names_G99.csv\
+rm \cb1 *.counts.csv \
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cb3 #XI DV1\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cb1 for folder in XI*; do cd $folder; cp *.counts.csv ../; cd ..; done \cb3 \
+paste \cb1 XI*.counts.csv\cb3  > ../XIDV1_dataset_G99.csv\
+\cb1 ls XI*.counts.csv\cb3  > ../XIDV1sample_names_G99.csv\
+rm \cb1 *.counts.csv \cb3 \
+\
+\
+\cb1 #Find stats (total input reads) in log files \cb3 (in alignedNewAXIS folders)\cb1 \
+\
+#DV\
+for folder in 0700*; do cd $folder; cp 07*Log.final.out ../; cd ..; done\
+for file in 07*Log.final.out; do prefix=$\{file/Log.final.out/\}; more $file | sed -n -e 's/Number\\ of\\ input\\ reads\\ \\|.*$: //p'>$prefix.totalReads.csv; done\
+paste 07*.totalReads.csv > ../DV_totalReads_G99.csv\
+ls 07*.totalReads.csv > ../DV_totalReadsNames_G99.csv\
+rm 07*Log.final.out \
+rm 07*totalReads.csv\
+mv ../DV*G99.csv ./\
+\
+#LML\
+for folder in 0700*; do cd $folder; cp 07*Log.final.out ../; cd ..; done\
+for file in 07*Log.final.out; do prefix=$\{file/Log.final.out/\}; more $file | sed -n -e 's/Number\\ of\\ input\\ reads\\ \\|.*$: //p'>$prefix.totalReads.csv; done\
+paste 07*.totalReads.csv > ../LML_totalReads_G99.csv\
+ls 07*.totalReads.csv > ../LML_totalReadsNames_G99.csv\
+rm 07*Log.final.out \
+rm 07*totalReads.csv\
+mv ../LML*G99.csv ./\
+\
+#PA\
+for folder in 0700*; do cd $folder; cp 07*Log.final.out ../; cd ..; done\
+for file in 07*Log.final.out; do prefix=$\{file/Log.final.out/\}; more $file | sed -n -e 's/Number\\ of\\ input\\ reads\\ \\|.*$: //p'>$prefix.totalReads.csv; done\
+paste 07*.totalReads.csv > ../PA_totalReads_G99.csv\
+ls 07*.totalReads.csv > ../PA_totalReadsNames_G99.csv\
+rm 07*Log.final.out \
+rm 07*totalReads.csv\
+mv ../PA*G99.csv ./\
+\
+#XI DV1\
+for folder in XI*; do cd $folder; cp XI*Log.final.out ../; cd ..; done\
+for file in XI*Log.final.out; do prefix=$\{file/Log.final.out/\}; more $file | sed -n -e 's/Number\\ of\\ input\\ reads\\ \\|.*$: //p'>$prefix.totalReads.csv; done\
+paste XI*.totalReads.csv > ../XIDV1_totalReads_G99.csv\
+ls XI*.totalReads.csv > ../XIDV1_totalReadsNames_G99.csv\
+rm XI*Log.final.out \
+rm XI*totalReads.csv\
+mv ../XI*G99.csv ./\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cb3  \
+\
+##############################\
+\
+#Incorporate other batches\
+#Download Ximena\'92s data (to rawsXIDV1)\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cb1 wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/ERR125/00\{0..9\}/ERR1252\{3..6\}\{0..9\}\{0..9\}/*.fastq.gz\
+\
+#We have the same slices sequenced in 2 lanes here, plus many extra files\
+\
+mkdir XIDV1_lane1\
+mv ./ERR1252\{545..610\}_*.gz ./XIDV1_lane1/\
+\
+mkdir XIDV1_lane2\cb3 \
+\cb1 mv ./ERR1252\{611..676\}_*.gz ./XIDV1_lane2/\cb3 \
+\
+rm *.gz\
+\
+#put reads from 2 lanes same slice together\
+\
+#R1\
+\
+n=611\
+i=1\
+\cb1 for file in ./XIDV1_lane1/ERR1252*_1.fastq.gz\
+do \
+	file2=\'93./XIDV1_lane2/ERR1252$\{n\}_1.fastq.gz"\
+	\cb3 ncf1=$\{file/.gz/\}\
+	ncf2=$\{file2/.gz/\}\
+	output=\'93\cb1 ./XI_DV1_$\{i\}_R1.fastq"\cb3 \
+	gunzip $file\
+	gunzip $file2\cb1 \
+	cat $ncf1 $ncf2 > $output\
+	gzip $output\
+	gzip $ncf1\
+	gzip $ncf2\
+	
+\fs26 \cf11 \cb5 \expnd0\expndtw0\kerning0
+\CocoaLigature1 n=$((n + \cf12 1\cf11 ))\
+	i=$((i + \cf12 1\cf11 ))
+\fs22 \cf2 \cb1 \kerning1\expnd0\expndtw0 \CocoaLigature0 \
+done\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cb3 #R2\
+\
+n=611\
+i=1\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cb1 for file in ./XIDV1_lane1/ERR1252*_2.fastq.gz\
+do \
+	file2=\'93./XIDV1_lane2/ERR1252$\{n\}_2.fastq.gz"\
+	\cb3 ncf1=$\{file/.gz/\}\
+	ncf2=$\{file2/.gz/\}\
+	output=\'93\cb1 ./XI_DV1_$\{i\}_R2.fastq"\cb3 \
+	gunzip $file\
+	gunzip $file2\cb1 \
+	cat $ncf1 $ncf2 > $output\
+	gzip $output\
+	gzip $ncf1\
+	gzip $ncf2\
+	
+\fs26 \cf11 \cb5 \expnd0\expndtw0\kerning0
+\CocoaLigature1 n=$((n + \cf12 1\cf11 ))\
+	i=$((i + \cf12 1\cf11 ))
+\fs22 \cf2 \cb1 \kerning1\expnd0\expndtw0 \CocoaLigature0 \
+done\cb3 \
+\
+##############################\
+\
+\cb1 \
+### Just testing\
+\
+../../../htseq/HTSeq-0.6.1p1/scripts/htseq-count -f bam -m intersection-nonempty -s no -i gene_name LML1-1.unique.bam ../../../genome/Mus_musculus.GRCm38.94.edited.gtf -r pos >> test.csv\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cb3 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cb1 samtools view LML1-1.unique.bam  -@ 8 | wc -l\
+\
+cut -f2 ./test.csv | paste -sd+ | bc\
+\
+head LML1-1Log.final.out\
+\
+#####################\
+\
+Check available space in current folder: \
+\
+\pard\pardeftab720\partightenfactor0
+
+\fs26 \cf4 \cb5 \expnd0\expndtw0\kerning0
+\CocoaLigature1 df -\cf6 Ph\cf4  . | tail -\cf7 1\cf4  | awk \cf7 '\{print $4\}'
+\fs22 \cf2 \cb3 \kerning1\expnd0\expndtw0 \CocoaLigature0 \
+}
