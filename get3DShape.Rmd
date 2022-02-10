@@ -1,0 +1,284 @@
+---
+title: "3D Expression patterns"
+author: "Mayra L. Ruiz Tejada Segura"
+date: "9/21/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r functions, echo=FALSE, message=FALSE, warning=FALSE}
+Sys.setenv("PATH" = paste(Sys.getenv("PATH"), "~/opt/miniconda3/bin/", sep = .Platform$path.sep))
+
+#library(EBImage)
+library(imager)
+library(reshape2)
+library(plotly)
+
+getBinMatrix<-function(im){
+  x<-load.image(im)
+  x<-as.raster(x)
+  x[x!="#FF0000"]<-0
+  x[x=="#FF0000"]<-1
+  return(x)
+}
+
+getProjectionXY<-function(obj3d){
+  seed<-matrix(0, dim(obj3d)[1], dim(obj3d)[2])
+  for(i in 1:(dim(obj3d)[1])){
+    for(j in 1:(dim(obj3d)[2])){
+      if(1 %in% obj3d[i,j,]){
+        seed[i,j]<-1
+      }
+    }
+  }
+  return(seed)
+}
+```
+
+
+
+```{r 3Dshape, echo=FALSE, message=FALSE, warning=FALSE}
+###### MOE Shape
+
+#Read images and get matrix
+#i=1
+files<-paste("./APredimages/sc", 1:12, "_copy.png", sep="")
+
+for(i in 1:12){
+  assign(paste("im", i, sep=""), getBinMatrix(files[i]))
+}
+
+############ turned AP (PA)
+#seed.3d<-array(0, c(dim(im1)[1],dim(im1)[2],90))
+#for(i in 1:18){
+#  for(j in 1:5){
+#    x<-get(paste("im", rev(1:18)[i], sep=""))
+#    x<-as.matrix(x)
+#    x<-t(apply(x, 1, as.numeric))
+#    seed.3d[, , (5*(i-1)+j)]<-x
+#  }
+#}
+
+#AP
+seed.3d<-array(0, c(dim(im1)[1],dim(im1)[2],60))
+for(i in 1:12){
+  for(j in 1:5){
+    x<-get(paste("im", i, sep=""))
+    x<-as.matrix(x)
+    x<-t(apply(x, 1, as.numeric))
+    seed.3d[, , (5*(i-1)+j)]<-x
+  }
+}
+
+#Eliminate empty slices
+while(!((1 %in% seed.3d[,1,])&(1 %in% seed.3d[1,,])&(1 %in% seed.3d[,dim(seed.3d)[2],])&(1 %in% seed.3d[dim(seed.3d)[1],,]))){
+  while(!((1 %in% seed.3d[,1,])&(1 %in% seed.3d[1,,])&(1 %in% seed.3d[,dim(seed.3d)[2],])&(1 %in% seed.3d[dim(seed.3d)[1],,]))){
+    if(!(1 %in% seed.3d[,1,])){seed.3d<-seed.3d[,-1,]}
+    if(!(1 %in% seed.3d[1,,])){seed.3d<-seed.3d[-1,,]}
+    if(!(1 %in% seed.3d[,dim(seed.3d)[2],])){seed.3d<-seed.3d[,-dim(seed.3d)[2],]}
+    if(!(1 %in% seed.3d[dim(seed.3d)[1],,])){seed.3d<-seed.3d[-dim(seed.3d)[1],,]}
+  }
+
+  array3d<-seed.3d
+  seed.3d<-array(0, c(54,56,60))
+  for(i in seq(1, 60, by=5)){
+    x<-array3d[,,i]
+    x <- resize(as.cimg(x), 54, 56)
+    x<-as.raster(x)
+    x[x=="#FFFFFF"]<-1
+    x[x=="#000000"]<-0
+    x<-t(apply(x, 2, as.numeric))
+    seed.3d[,,i:(i+4)]<-x
+  }
+}
+
+#Just 60 PA slices
+#seed.3d<-seed.3d[,,1:60]
+############
+
+M<-melt(seed.3d)
+names(M)<-c("DV",  "LML",  "AP",  "value")
+M1<-M[-which(M$value==0),]
+
+plot_ly(M1, x = ~DV, y = ~LML, z = ~AP, color=1, colors = "blue", showscale=FALSE, marker=c(list(size=1)))
+##Plot shape 
+#M<-melt(seed.3d)
+#M1<-M
+#M1$Var1[M1$value==0]<-NA
+#M1$Var2[M1$value==0]<-NA
+#M1$Var3[M1$value==0]<-NA
+#points3d(M1$Var1,M1$Var2,M1$Var3)
+saveRDS(seed.3d, "./seed.3d.Rda")
+write.csv(M, "./meltedShape.csv")
+```
+
+
+
+```{r 3DshapeSymmetry, echo=FALSE, message=FALSE, warning=FALSE}
+seed.3d<-readRDS(file="./seed.3d.Rda")
+
+for(i in 1:dim(seed.3d)[3]){
+  x<-seed.3d[,,i]
+  obj.3d<-array(0, c(54, 28, 2))
+  obj.3d[,,1]<-x[,1:28]
+  obj.3d[,,2]<-x[,rev(29:56)]
+  x<-getProjectionXY(obj.3d)
+  x<-cbind(x, x[,rev(1:28)])
+  seed.3d[,,i]<-x
+}
+
+M<-melt(seed.3d)
+names(M)<-c("DV",  "LML",  "AP",  "value")
+M1<-M[-which(M$value==0),]
+
+plot_ly(M1, x = ~DV, y = ~LML, z = ~AP, color=1, colors = "gray", showscale=FALSE, marker=c(list(size=1)))
+
+saveRDS(seed.3d, "./seed.3dSym.Rda")
+write.csv(M, "./meltedSymShape.csv")
+```
+
+
+```{r}
+seed.3d<-readRDS(file="./seed.3dSym.Rda")
+
+#Little shape corrections
+
+#x<-seed.3d[,,62]
+#seed.3d[18:24,4:61,62]<-1
+#x<-seed.3d[,,52]
+#seed.3d[44:47,22:43,52]<-1
+#seed.3d[48:53,24:41,52]<-1
+#seed.3d[48:50,23:42,52]<-1
+#x<-seed.3d[,,47]
+#seed.3d[36:42,13:52,47]<-1
+#seed.3d[37:41,12:53,47]<-1
+#x<-seed.3d[,,42]
+#seed.3d[35:40,9:56,42]<-1
+#seed.3d[34:38,7:58,42]<-1
+#seed.3d[33:36,6:59,42]<-1
+
+#Reassemble 3d shape
+
+#slice1<-seed.3d[,,1]
+#slice2<-seed.3d[,,5]
+#slice3<-seed.3d[,,9]
+#slice4<-seed.3d[,,13]
+#slice5<-seed.3d[,,17]
+#slice6<-seed.3d[,,22]
+#slice7<-seed.3d[,,27]
+#slice8<-seed.3d[,,32]
+#slice9<-seed.3d[,,37]
+#slice10<-seed.3d[,,42]
+#slice11<-seed.3d[,,47]
+#slice12<-seed.3d[,,52]
+#slice13<-seed.3d[,,57]
+#slice14<-seed.3d[,,62]
+#slice15<-seed.3d[,,67]
+#slice16<-seed.3d[,,72]
+#slice17<-seed.3d[,,77]
+#slice18<-seed.3d[,,82]
+
+#seed.3d<-array(0, c(72,64,90))
+#k=1
+#for(i in seq(1, 90, by=5)){
+#  seed.3d[,,i:(i+4)]<-get(paste("slice", k, sep=""))
+#  k=k+1
+#}
+
+#Just 82 PA slices
+#seed.3d<-seed.3d[,,-c(5, 10, 15, 20, 75, 80, 85, 90)]
+
+M<-melt(seed.3d)
+names(M)<-c("DV",  "LML",  "AP",  "value")
+M1<-M[-which(M$value==0),]
+
+mt2<-data.frame(DV=M1$DV[M1$AP==1], LML=M1$LML[M1$AP==1], val=M1$value[M1$AP==1])
+plot_ly(mt2, x = ~DV, y = ~LML, color = ~val, colors = "blue") %>%
+  layout(xaxis = list(range = c(0, dim(seed.3d)[1])), yaxis = list(range = c(0, dim(seed.3d)[2]))) %>% colorbar(limits = c(0,1))
+
+mt2<-data.frame(DV=M1$DV[M1$AP==6], LML=M1$LML[M1$AP==6], val=M1$value[M1$AP==6])
+plot_ly(mt2, x = ~DV, y = ~LML, color = ~val, colors = "blue") %>%
+  layout(xaxis = list(range = c(0, dim(seed.3d)[1])), yaxis = list(range = c(0, dim(seed.3d)[2]))) %>% colorbar(limits = c(0,1))
+
+mt2<-data.frame(DV=M1$DV[M1$AP==11], LML=M1$LML[M1$AP==11], val=M1$value[M1$AP==11])
+plot_ly(mt2, x = ~DV, y = ~LML, color = ~val, colors = "blue") %>%
+  layout(xaxis = list(range = c(0, dim(seed.3d)[1])), yaxis = list(range = c(0, dim(seed.3d)[2]))) %>% colorbar(limits = c(0,1))
+
+mt2<-data.frame(DV=M1$DV[M1$AP==16], LML=M1$LML[M1$AP==16], val=M1$value[M1$AP==16])
+plot_ly(mt2, x = ~DV, y = ~LML, color = ~val, colors = "blue") %>%
+  layout(xaxis = list(range = c(0, dim(seed.3d)[1])), yaxis = list(range = c(0, dim(seed.3d)[2]))) %>% colorbar(limits = c(0,1))
+
+mt2<-data.frame(DV=M1$DV[M1$AP==21], LML=M1$LML[M1$AP==21], val=M1$value[M1$AP==21])
+plot_ly(mt2, x = ~DV, y = ~LML, color = ~val, colors = "blue") %>%
+  layout(xaxis = list(range = c(0, dim(seed.3d)[1])), yaxis = list(range = c(0, dim(seed.3d)[2]))) %>% colorbar(limits = c(0,1))
+
+mt2<-data.frame(DV=M1$DV[M1$AP==26], LML=M1$LML[M1$AP==26], val=M1$value[M1$AP==26])
+plot_ly(mt2, x = ~DV, y = ~LML, color = ~val, colors = "blue") %>%
+  layout(xaxis = list(range = c(0, dim(seed.3d)[1])), yaxis = list(range = c(0, dim(seed.3d)[2]))) %>% colorbar(limits = c(0,1))
+
+mt2<-data.frame(DV=M1$DV[M1$AP==31], LML=M1$LML[M1$AP==31], val=M1$value[M1$AP==31])
+plot_ly(mt2, x = ~DV, y = ~LML, color = ~val, colors = "blue") %>%
+  layout(xaxis = list(range = c(0, dim(seed.3d)[1])), yaxis = list(range = c(0, dim(seed.3d)[2]))) %>% colorbar(limits = c(0,1))
+
+mt2<-data.frame(DV=M1$DV[M1$AP==36], LML=M1$LML[M1$AP==36], val=M1$value[M1$AP==36])
+plot_ly(mt2, x = ~DV, y = ~LML, color = ~val, colors = "blue") %>%
+  layout(xaxis = list(range = c(0, dim(seed.3d)[1])), yaxis = list(range = c(0, dim(seed.3d)[2]))) %>% colorbar(limits = c(0,1))
+
+mt2<-data.frame(DV=M1$DV[M1$AP==41], LML=M1$LML[M1$AP==41], val=M1$value[M1$AP==41])
+plot_ly(mt2, x = ~DV, y = ~LML, color = ~val, colors = "blue") %>%
+  layout(xaxis = list(range = c(0, dim(seed.3d)[1])), yaxis = list(range = c(0, dim(seed.3d)[2]))) %>% colorbar(limits = c(0,1))
+
+mt2<-data.frame(DV=M1$DV[M1$AP==46], LML=M1$LML[M1$AP==46], val=M1$value[M1$AP==46])
+plot_ly(mt2, x = ~DV, y = ~LML, color = ~val, colors = "blue") %>%
+  layout(xaxis = list(range = c(0, dim(seed.3d)[1])), yaxis = list(range = c(0, dim(seed.3d)[2]))) %>% colorbar(limits = c(0,1))
+
+mt2<-data.frame(DV=M1$DV[M1$AP==51], LML=M1$LML[M1$AP==51], val=M1$value[M1$AP==51])
+plot_ly(mt2, x = ~DV, y = ~LML, color = ~val, colors = "blue") %>%
+  layout(xaxis = list(range = c(0, dim(seed.3d)[1])), yaxis = list(range = c(0, dim(seed.3d)[2]))) %>% colorbar(limits = c(0,1))
+
+mt2<-data.frame(DV=M1$DV[M1$AP==57], LML=M1$LML[M1$AP==57], val=M1$value[M1$AP==57])
+plot_ly(mt2, x = ~DV, y = ~LML, color = ~val, colors = "blue") %>%
+  layout(xaxis = list(range = c(0, dim(seed.3d)[1])), yaxis = list(range = c(0, dim(seed.3d)[2]))) %>% colorbar(limits = c(0,1))
+
+
+M3=M
+if(!is.na(M3)){
+  names(M3)<-c("DV", "LML", "AP", "value")
+  M3<-M3[-which(M$value==0),]
+    
+  M3$value[M3$value<0.1]<-0
+    
+    
+  palette1 <- colorRampPalette(c("gray", "gray", "blue", "yellow", "orange", "red"))(n = 60)
+  palette2 <- colorRampPalette(c("darkred", "deeppink4", "black"))(n = 250)
+  my_palette2 <- c(palette1, palette2)
+  my_palette2 <- colorRampPalette(c("gray", "gray", "blue", "yellow", "orange", "red"))(n=100)
+    
+  j=1
+  for(i in seq(1, max(M3$AP), 3)){
+    mt2<-data.frame(DV=M3$DV[M3$AP==i], LML=M3$LML[M3$AP==i], val=M3$value[M3$AP==i])
+    if(sum(mt2$val)==0){
+      assign(paste("p", j, sep=""), plot_ly(mt2, x = ~LML, y = ~DV, color = 1, colors = "gray", showlegend=FALSE) %>% layout(xaxis = list(range = c(0, dim(seed.3d)[2])), yaxis = list(range = c(dim(seed.3d)[1], 0)), width=dim(seed.3d)[2]*15, height=dim(seed.3d)[1]*15) %>% hide_colorbar())
+    }else{
+      assign(paste("p", j, sep=""), plot_ly(mt2, x = ~LML, y = ~DV, color = ~val, colors = my_palette2, showlegend=FALSE) %>% layout(xaxis = list(range = c(0, dim(seed.3d)[2])), yaxis = list(range = c(dim(seed.3d)[1], 0)), width=dim(seed.3d)[2]*15, height=dim(seed.3d)[1]*15) %>% colorbar(limits = c(min(M3$value), max(M3$value))) %>% hide_colorbar())
+    }
+    j=j+1
+  }
+  varlist<-ls(pattern="p[[:digit:]]")
+  varlist<-mixedsort(varlist)
+  plotlistLMLxDV<-list()
+  for(i in 1:length(varlist)){
+    plotlistLMLxDV[[i]]<-get(varlist[i])
+  }
+    
+  rm(list=varlist)
+  tmp<-subplot(plotlistLMLxDV, nrows=5, titleX = T, shareX = T, shareY = T)
+  orca(tmp, file = paste("../../figures_pdf2/shapeSlicesAP.pdf", sep=""))
+}
+#saveRDS(seed.3d, "./seed.3dSymCorrected.Rda")
+#write.csv(M, "./meltedSymCorrectedShape.csv")
+
+```
